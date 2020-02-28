@@ -1,3 +1,9 @@
+# sqlite-zstd
+
+Extension for sqlite that provides transparent dictionary-based row-level compression for sqlite. This basically allows you to compress entries in a sqlite database almost as well as if you were compressing the whole DB file, but while retaining random access.
+
+TODO: describe more
+
 # Future Work / Ideas / Todo
 
 -   allow compression dict by grouping by other column (maybe unnecessary)

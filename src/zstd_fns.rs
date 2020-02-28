@@ -242,6 +242,14 @@ macro_rules! format_sqlite {
     };
 }
 
+///
+/// enables transparent row-level compression for a table with the following steps:
+///
+/// 1. renames tablename to _tablename_zstd
+/// 2. trains a zstd dictionary on the column by sampling the existing data in the table
+/// 3. creates a view called tablename that mirrors _tablename_zstd except it decompresses the compressed column on the fly
+/// 4. creates INSERT, UPDATE and DELETE triggers on the view so they affect the backing table instead
+///
 fn zstd_transparently<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
     let table_name: String = ctx.get(0)?;
     let new_table_name = format!("_{}_zstd", table_name);
@@ -477,56 +485,6 @@ pub fn add_functions(db: rusqlite::Connection) -> anyhow::Result<()> {
         nondeterministic,
         zstd_transparently,
     )?;
-
-    // tests
-    /*let x: String = db.query_row(
-        "select zstd_decompress(zstd_compress('test test test test test test test test test', 19, null))",
-        params![],
-        |row| row.get(0),
-    )?;
-
-    println!("result = {}", &x);*/
-
-    /*db.execute_batch(
-        "
-        create table if not exists _zstd_dicts (
-            name text primary key not null,
-            dict blob not null
-        );
-        insert or ignore into _zstd_dicts values ('data',
-            (select zstd_train_dict(data, 100000, (select 100000 * 100 / avg(length(data)) as sample_count from events))
-                as dict from events)
-        );
-        update events set data = zstd_compress(data, 3, (select dict from _zstd_dicts where name = 'data'));
-        alter table events rename to events_compressed;
-        "
-    )?;*/
-    /*db.execute("drop view if exists events", params![])?;
-    db.execute("create view if not exists events as
-    select id, timestamp, data_type, sampler, sampler_sequence_id, zstd_decompress(data, (select dict from _zstd_dicts where name='data')) as data from events_compressed", params![])?;
-    let mut stmt =
-        db.prepare("explain query plan select * from events where timestamp > '2020' limit 10")?;
-    let col_names = stmt
-        .column_names()
-        .into_iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>();
-    println!("cols={:?}", col_names);
-    let co = stmt.query_map(params![], |row| {
-        println!("eee");
-        let s = col_names
-            .iter()
-            .enumerate()
-            .map(|(i, e)| format!("{}={}", e, format_blob(row.get_raw(i))))
-            .collect::<Vec<String>>()
-            .join(", ");
-        println!("{}", s);
-        Ok("z")
-    })?;
-    for entry in co {
-        entry?;
-    }*/
-
     Ok(())
 }
 
@@ -541,16 +499,16 @@ fn format_blob(b: ValueRef) -> String {
     }
 }
 
-/**
- *  adapted from https://github.com/jgallagher/rusqlite/blob/022266239233857faa7f0b415c1a3d5095d96a53/src/vtab/mod.rs#L629
- * sql injection safe? investigate
- * hello -> `hello`
- * he`lo -> `he``lo`
- *
- * we intentionally use the `e` syntax instead of "e" because of
- * "a misspelled double-quoted identifier will be interpreted as a string literal, rather than generating an error"
- * see https://www.sqlite.org/quirks.html#double_quoted_string_literals_are_accepted
- */
+///
+/// adapted from https://github.com/jgallagher/rusqlite/blob/022266239233857faa7f0b415c1a3d5095d96a53/src/vtab/mod.rs#L629
+/// sql injection safe? investigate
+/// hello -> `hello`
+/// he`lo -> `he``lo`
+///
+/// we intentionally use the `e` syntax instead of "e" because of
+/// "a misspelled double-quoted identifier will be interpreted as a string literal, rather than generating an error"
+/// see https://www.sqlite.org/quirks.html#double_quoted_string_literals_are_accepted
+///
 fn escape_sqlite_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace("`", "``"))
 }
