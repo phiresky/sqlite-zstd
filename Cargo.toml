@@ -13,6 +13,9 @@ crate-type = ["cdylib"]
 zstd = "0.5.1"
 anyhow = "1.0.26"
 rand = "0.7.3"
+serde_json = "1.0.48"
+serde = "1.0.104"
+chrono = "0.4.10"
 
 [dependencies.rusqlite]
 # git = "https://github.com/Genomicsplc/rusqlite", branch="pr/loadable-extensions"
