@@ -21,3 +21,6 @@ chrono = "0.4.10"
 # git = "https://github.com/Genomicsplc/rusqlite", branch="pr/loadable-extensions"
 path = "../rusqlite"
 features=["functions", "blob", "loadable_extension"]
+
+[profile.release]
+lto = true

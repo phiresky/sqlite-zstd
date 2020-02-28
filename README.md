@@ -6,6 +6,7 @@ TODO: describe more
 
 # Future Work / Ideas / Todo
 
+-   tests
 -   allow compression dict by grouping by other column (maybe unnecessary)
 -   correctly handle indices over compressed columns
 -   do compression in different thread(s) for performance
