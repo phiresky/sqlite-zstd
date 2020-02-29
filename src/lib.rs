@@ -38,6 +38,6 @@ pub extern "C" fn sqlite3_sqlitezstd_init(
 
 fn init(db_handle: *mut ffi::sqlite3) -> anyhow::Result<()> {
     let db = unsafe { rusqlite::Connection::from_handle(db_handle)? };
-    crate::zstd_fns::add_functions(db)?;
+    crate::zstd_fns::add_functions(&db)?;
     Ok(())
 }

@@ -254,7 +254,7 @@ fn zstd_transparently<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Er
     let table_name: String = ctx.get(0)?;
     let new_table_name = format!("_{}_zstd", table_name);
     let column_name: String = ctx.get(1)?;
-    let mut db = ctx.get_connection()?;
+    let db = &mut ctx.get_connection()?;
     let db = db.transaction()?;
 
     let columns_info: Vec<(String, bool)> = db
@@ -463,7 +463,7 @@ fn zstd_transparently<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Er
     Ok(ToSqlOutput::Owned(Value::Text("Done!".to_string())))
 }
 
-pub fn add_functions(db: rusqlite::Connection) -> anyhow::Result<()> {
+pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     let nondeterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY;
     let deterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     // zstd_compress(data: text|blob, level: int = 3, dictionary: blob | null = null)
