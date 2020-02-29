@@ -12,6 +12,7 @@ use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;
 use std::io::Write;
+use zstd::dict::EncoderDictionary;
 
 /*fn to_rusqlite<E>(e: Box<E>) -> rusqlite::Error
 where
@@ -94,6 +95,63 @@ impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdT
     }
 }
 
+type OwnedEncoderDict<'a> = owning_ref::OwningHandle<Vec<u8>, Box<EncoderDictionary<'a>>>;
+// zstd-rs only exposes zstd_safe::create_cdict_by_reference, not zstd_safe::create_cdict
+// so we need to keep a reference to the vector ourselves
+// is there a better way?
+fn wrap_encoder_dict<'a>(dict_raw: Vec<u8>, level: i32) -> OwnedEncoderDict<'a> {
+    owning_ref::OwningHandle::new_with_fn(dict_raw, |d| {
+        Box::new(EncoderDictionary::new(
+            unsafe { d.as_ref() }.unwrap(),
+            level,
+        ))
+    })
+}
+
+/// load a dict from sqlite function parameters
+///
+/// sqlite sadly does not do auxdata caching for subqueries like `zstd_compress(data, 3, (select dict from _zstd_dicts where id = 4))`
+/// so instead we support the syntax `zstd_compress(data, 3, 4)` as an alias to the above
+/// if the dict parameter is a number, the dict will be queried from the _zstd_dicts table and cached in sqlite auxdata
+/// so it is oly constructed once per query
+///
+/// this function is not 100% correct because the level is passed separately from the dictionary but the dictionary is cached in the aux data of the dictionary parameter
+/// e.g. `select zstd_compress(tbl.data, tbl.row_compression_level, 123) from tbl` will probably compress all the data with the same compression ratio instead of a random one
+/// as a workaround `select zstd_compress(tbl.data, tbl.row_compression_level, (select 123)) from tbl` probably works
+/// to fix this the level parameter would need to be checked against the constructed dictionary and the dict discarded on mismatch
+fn encoder_dict_from_ctx<'a>(
+    ctx: &'a Context,
+    arg_index: usize,
+    level: i32,
+) -> rusqlite::Result<&'a OwnedEncoderDict<'a>> {
+    Ok(match ctx.get_aux::<OwnedEncoderDict>(arg_index as i32)? {
+        Some(d) => d,
+        None => {
+            eprintln!("loading dictionary (should only happen once per query)");
+            let dict_raw = /*ctx.get::<Vec<u8>>(arg_index)?;*/
+            match ctx.get_raw(arg_index) {
+                ValueRef::Blob(b) => b.to_vec(),
+                ValueRef::Integer(i) => {
+                    let db = ctx.get_connection()?;
+                    let res: Vec<u8> = db.query_row(
+                        "select dict from _zstd_dicts where id = ?",
+                        params![i],
+                        |r| r.get(0),
+                    )?;
+                    res
+                }
+                e => Err(rusqlite::Error::InvalidFunctionParameterType(
+                    arg_index,
+                    e.data_type(),
+                ))?,
+            };
+            let dict = wrap_encoder_dict(dict_raw, level);
+            ctx.set_aux(arg_index as i32, dict);
+            ctx.get_aux::<OwnedEncoderDict>(arg_index as i32)?.unwrap()
+        }
+    })
+}
+
 fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
     let (is_blob, input_value) = match ctx.get_raw(0) {
         ValueRef::Blob(b) => (true, b),
@@ -110,36 +168,13 @@ fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
     } else {
         ctx.get::<i32>(1)?
     };
-    let dict_raw = if ctx.len() < 3 {
+    let dict = if ctx.len() < 3 {
         // no third argument -> no dict
         None
     } else {
-        Some(ctx.get::<Vec<u8>>(2)?)
+        Some(encoder_dict_from_ctx(&ctx, 2, level)?)
     };
-    use zstd::dict::EncoderDictionary;
-    let dict: Option<EncoderDictionary> =
-        dict_raw.as_ref().map(|e| EncoderDictionary::new(e, level));
-    /*let dict: Option<&EncoderDictionary> = {
-        // cache dict instance to auxiliary data so its not created every time
-        // i'm too stupid for this
-        let dict = match ctx.get_aux::<Option<EncoderDictionary>>(2)? {
-            Some(d) => d.as_ref(),
-            None => match ctx.get::<Option<Vec<u8>>>(2)? {
-                Some(d) => {
-                    let dict = EncoderDictionary::new(d.as_ref(), level);
-                    ctx.set_aux(2, Some(dict));
-                    ctx.get_aux::<Option<EncoderDictionary>>(2)?
-                        .unwrap()
-                        .as_ref()
-                }
-                None => {
-                    ctx.set_aux(2, Some(Option::<EncoderDictionary>::None));
-                    None
-                }
-            },
-        };
-        dict
-    };*/
+
     let is_blob: &[u8] = if is_blob { b"b" } else { b"s" };
     let res = {
         let out = Vec::new();
@@ -154,7 +189,6 @@ fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
         encoder.write_all(is_blob).map_err(|e| UFE(Box::new(e)))?;
         encoder.finish()
     };
-    // let dictionary
     Ok(Box::new(res.map_err(|e| UFE(Box::new(e)))?))
 }
 
@@ -346,7 +380,7 @@ fn zstd_transparently<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Er
     };
     {
         let compress_query = format_sqlite!(
-            "update {} set {1} = zstd_compress({1}, ?, (select dict from _zstd_dicts where id=?))",
+            "update {} set {1} = zstd_compress({1}, ?, ?)",
             &new_table_name,
             &column_name
         );
@@ -518,4 +552,16 @@ fn escape_sqlite_identifier(identifier: &str) -> String {
  */
 fn escape_sqlite_string(string: &str) -> String {
     format!("'{}'", string.replace("'", "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    //
+    // check that zstd_transparently only creates one dictionary on the full table UPDATE
+
+    //
+    // check that `insert into events values ('a', 'b', 'c', 'd', 'e', 'f'), ('b', 'c', 'd', 'e', 'f', 'g');`
+    // only creates one dictionary
+
+    // check that decompress only creates one dictionary
 }
