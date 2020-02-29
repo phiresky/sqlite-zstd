@@ -10,7 +10,7 @@ mod zstd_fns;
 #[no_mangle]
 pub extern "C" fn sqlite3_sqlitezstd_init(
     db: *mut ffi::sqlite3,
-    pz_err_msg: &mut &mut std::os::raw::c_char,
+    _pz_err_msg: &mut &mut std::os::raw::c_char,
     p_api: *mut ffi::sqlite3_api_routines,
 ) -> c_int {
     // SQLITE_EXTENSION_INIT2 equivalent

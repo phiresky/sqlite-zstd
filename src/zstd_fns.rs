@@ -1,31 +1,14 @@
 use rand::Rng;
 use rusqlite::functions::Context;
 use rusqlite::functions::FunctionFlags;
+use rusqlite::types::ToSql;
 use rusqlite::types::ToSqlOutput;
-use rusqlite::types::{Null, ToSql};
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::Error::UserFunctionError as UFE;
 use rusqlite::{named_params, params};
 use serde_json::json;
-use std::borrow::Cow;
-use std::convert::TryInto;
-use std::fs::File;
-use std::io::Read;
 use std::io::Write;
 use zstd::dict::EncoderDictionary;
-
-/*fn to_rusqlite<E>(e: Box<E>) -> rusqlite::Error
-where
-    E: std::error::Error + std::marker::Send + std::marker::Sync,
-{
-    rusqlite::Error::UserFunctionError(e)
-}*/
-
-/*fn to_rusqlite<'e>(
-    e: impl std::error::Error + std::marker::Send + std::marker::Sync + 'e,
-) -> rusqlite::Error {
-    rusqlite::Error::UserFunctionError(Box::new(e))
-}*/
 
 struct ZstdTrainDictAggregate;
 struct ZstdTrainDictState {
@@ -58,8 +41,8 @@ impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdT
         let cur = match ctx.get_raw(0) {
             ValueRef::Blob(b) => b,
             ValueRef::Text(b) => b,
-            ValueRef::Real(f) => return Ok(()),
-            ValueRef::Integer(i) => return Ok(()),
+            ValueRef::Real(_f) => return Ok(()),
+            ValueRef::Integer(_i) => return Ok(()),
             ValueRef::Null => return Ok(()),
         };
         let i = state.total_count;
@@ -578,6 +561,7 @@ mod tests {
 
     fn create_example_db() -> anyhow::Result<Connection> {
         let mut db = Connection::open_in_memory()?;
+        add_functions(&db)?;
         db.execute_batch(
             "
             create table events (

@@ -112,6 +112,7 @@ checksum = "eb147597cdf94ed43ab7a9038716637d2d1bf2bc571da995d0028dec06bd3018"
 [[package]]
 name = "libsqlite3-sys"
 version = "0.18.0"
+source = "git+https://github.com/phiresky/rusqlite?branch=pr/loadable-extensions#327aaf5e203dc59737ba1e9bc2fc07bfd850fdae"
 dependencies = [
  "pkg-config",
  "quote",
@@ -304,6 +305,7 @@ checksum = "2439c63f3f6139d1b57529d16bc3b8bb855230c8efcc5d3a896c8bea7c3b1e84"
 [[package]]
 name = "rusqlite"
 version = "0.21.0"
+source = "git+https://github.com/phiresky/rusqlite?branch=pr/loadable-extensions#327aaf5e203dc59737ba1e9bc2fc07bfd850fdae"
 dependencies = [
  "bitflags",
  "fallible-iterator",

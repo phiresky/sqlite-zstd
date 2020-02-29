@@ -20,13 +20,14 @@ owning_ref = "0.4.1"
 names = "0.11.0"
 
 [dependencies.rusqlite]
-# git = "https://github.com/Genomicsplc/rusqlite", branch="pr/loadable-extensions"
-path = "../rusqlite"
-features=["functions", "blob", "loadable_extension"]
+git = "https://github.com/phiresky/rusqlite"
+branch = "pr/loadable-extensions"
+features = ["functions", "blob", "loadable_extension"]
 
 [dev-dependencies.rusqlite]
-path = "../rusqlite"
-features=["functions", "blob"]
+git = "https://github.com/phiresky/rusqlite"
+branch = "pr/loadable-extensions"
+features = ["functions", "blob"]
 
 [profile.release]
 lto = true
