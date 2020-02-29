@@ -284,7 +284,7 @@ macro_rules! format_sqlite {
 /// 3. creates a view called tablename that mirrors _tablename_zstd except it decompresses the compressed column on the fly
 /// 4. creates INSERT, UPDATE and DELETE triggers on the view so they affect the backing table instead
 ///
-fn zstd_transparently<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
+fn zstd_enable_transparent<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
     let table_name: String = ctx.get(0)?;
     let new_table_name = format!("_{}_zstd", table_name);
     let column_name: String = ctx.get(1)?;
@@ -500,11 +500,10 @@ fn zstd_transparently<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Er
 pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     let nondeterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY;
     let deterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
-    // zstd_compress(data: text|blob, level: int = 3, dictionary: blob | null = null)
+    //
     db.create_scalar_function("zstd_compress", 1, deterministic, zstd_compress)?;
     db.create_scalar_function("zstd_compress", 2, deterministic, zstd_compress)?;
     db.create_scalar_function("zstd_compress", 3, deterministic, zstd_compress)?;
-    // zstd_decompress(data: text|blob, dictionary: blob | null = null)
     db.create_scalar_function("zstd_decompress", 1, deterministic, zstd_decompress)?;
     db.create_scalar_function("zstd_decompress", 2, deterministic, zstd_decompress)?;
     db.create_aggregate_function(
@@ -514,10 +513,10 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
         ZstdTrainDictAggregate,
     )?;
     db.create_scalar_function(
-        "zstd_transparently",
+        "zstd_enable_transparent",
         2,
         nondeterministic,
-        zstd_transparently,
+        zstd_enable_transparent,
     )?;
     Ok(())
 }
@@ -556,8 +555,125 @@ fn escape_sqlite_string(string: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    // the point of this is that it's something you might store in a DB that has lots of redundant data
+    #[derive(Serialize, Deserialize, Debug)]
+    #[serde(tag = "type")]
+    enum EventData {
+        OpenApplication {
+            id: i32,
+            app_name: String,
+            app_type: String,
+            properties: BTreeMap<String, String>,
+        },
+        CloseApplication {
+            id: i32,
+        },
+        Shutdown,
+    }
+
+    fn create_example_db() -> anyhow::Result<Connection> {
+        let mut db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "
+            create table events (
+                id integer not null primary key,
+                timestamp text not null,
+                data json not null
+            );
+        ",
+        )?;
+
+        // people use maybe 100 different apps
+        let app_names: Vec<String> = names::Generator::with_naming(names::Name::Plain)
+            .take(100)
+            .collect();
+        // of maybe 10 different categories
+        let app_types: Vec<String> = names::Generator::with_naming(names::Name::Plain)
+            .take(10)
+            .collect();
+        use rand::distributions::WeightedIndex;
+        use rand::prelude::*;
+
+        let window_properties = &[
+            (30, "_GTK_APPLICATION_ID"),
+            (30, "_GTK_APPLICATION_OBJECT_PATH"),
+            (30, "_GTK_UNIQUE_BUS_NAME"),
+            (30, "_GTK_WINDOW_OBJECT_PATH"),
+            (40, "_NET_WM_USER_TIME_WINDOW"),
+            (41, "WM_CLIENT_LEADER"),
+            (50, "_NET_WM_BYPASS_COMPOSITOR"),
+            (60, "WM_WINDOW_ROLE"),
+            (61, "_MOTIF_WM_HINTS"),
+            (90, "_GTK_THEME_VARIANT"),
+            (91, "_NET_WM_SYNC_REQUEST_COUNTER"),
+            (91, "_NET_WM_USER_TIME"),
+            (139, "_NET_STARTUP_ID"),
+            (170, "_NET_WM_ICON_NAME"),
+            (180, "WM_HINTS"),
+            (220, "_NET_WM_WINDOW_TYPE"),
+            (220, "XdndAware"),
+            (229, "WM_LOCALE_NAME"),
+            (230, "_NET_WM_NAME"),
+            (230, "_NET_WM_PID"),
+            (230, "WM_CLIENT_MACHINE"),
+            (240, "_NET_WM_DESKTOP"),
+            (240, "_NET_WM_STATE"),
+            (240, "WM_CLASS"),
+            (240, "WM_NORMAL_HINTS"),
+            (240, "WM_PROTOCOLS"),
+            (240, "WM_STATE"),
+        ];
+
+        let mut rng = thread_rng();
+        let event_type_dist = WeightedIndex::new(&[10, 10, 1])?;
+        let window_properties_dist = WeightedIndex::new(window_properties.iter().map(|e| e.0))?;
+        let app_id_dist = rand::distributions::Uniform::from(0..100);
+        let data = (1..100000).map(|_| match event_type_dist.sample(&mut rng) {
+            0 => {
+                let mut properties = BTreeMap::new();
+                for i in 1..rand::distributions::Uniform::from(5..20).sample(&mut rng) {
+                    let p = window_properties[window_properties_dist.sample(&mut rng)].1;
+                    properties.insert(p.to_string(), "1".to_string());
+                }
+                EventData::OpenApplication {
+                    id: app_id_dist.sample(&mut rng),
+                    app_name: app_names.choose(&mut rng).unwrap().clone(),
+                    app_type: app_types.choose(&mut rng).unwrap().clone(),
+                    properties,
+                }
+            }
+            1 => EventData::CloseApplication {
+                id: app_id_dist.sample(&mut rng),
+            },
+            2 => EventData::Shutdown,
+            _ => panic!("impossible"),
+        });
+        {
+            let tx = db.transaction()?;
+            let mut insert = tx.prepare("insert into events (timestamp, data) values (?, ?, ?)")?;
+            for d in data {
+                insert.execute(params![
+                    chrono::Utc::now().to_rfc3339(),
+                    serde_json::to_string_pretty(&d)?
+                ])?;
+            }
+        }
+        Ok(db)
+    }
+
+    #[test]
+    fn sanity() -> anyhow::Result<()> {
+        let db = create_example_db()?;
+
+        Ok(())
+    }
     //
-    // check that zstd_transparently only creates one dictionary on the full table UPDATE
+    // check that zstd_enable_transparent only creates one dictionary on the full table UPDATE
 
     //
     // check that `insert into events values ('a', 'b', 'c', 'd', 'e', 'f'), ('b', 'c', 'd', 'e', 'f', 'g');`

@@ -11,6 +11,40 @@ TODO: describe
 -   the whole api interface / all functions
 -   how it works
 
+## provided sql functions
+
+-   `zstd_enable_transparent(table_name, column_name)`
+
+    Enable transparent row-level compression of the given column on the given table. A dictionary will be automatically trained on the existing data (so make sure you have some data in there first).
+
+    The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries.
+
+    TODO: allow multiple columns and more exact configuration
+
+-   `zstd_compress(data: text|blob, level: int = 3, dictionary: blob | int | null = null) -> blob`
+
+    Compresses the given data, with the compression level (1 - 22, default 3)
+
+    if dictionary is a blob it will be directly used
+    if dictionary is an int i, it is functionally equivalent to `zstd_compress(data, level, (select dict from _zstd_dict where id = i))`
+
+-   `zstd_decompress(data: blob, dictionary: blob | int | null = null) -> text|blob`
+
+    Decompresses the given data. if the dictionary is wrong, the result is undefined
+
+-   `zstd_train_dict(agg, dict_size: int, sample_count: int) -> blob`
+
+    Aggregate function (like sum() or count()) to train a zstd dictionary on sample_count samples of the given aggregate data
+
+    example use: `select zstd_train_dict(tbl.data, 100000, 1000) from tbl` will return a dictionary of size 100kB trained on 1000 samples in `tbl`
+
+    The recommended number of samples is 100x the target dictionary size. As an example, you can train with the "optimal" sample count as follows:
+
+    ```sql
+    select zstd_train_dict(data, 100000, (select (100000 * 100 / avg(length(data))) as sample_count from tbl))
+                    as dict from tbl
+    ```
+
 # Future Work / Ideas / Todo
 
 -   tests
