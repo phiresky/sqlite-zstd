@@ -30,7 +30,7 @@ pub extern "C" fn sqlite3_sqlitezstd_init(
             ffi::SQLITE_OK
         }
         Err(e) => {
-            eprintln!("[sqlite-zstd] error: {:?}", e);
+            eprintln!("[sqlite-zstd] init error: {:?}", e);
             ffi::SQLITE_ERROR
         }
     }

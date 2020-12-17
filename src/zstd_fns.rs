@@ -1,13 +1,12 @@
+use anyhow::Context as AContext;
 use rand::Rng;
-use rusqlite::functions::Context;
-use rusqlite::functions::FunctionFlags;
+use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::ToSql;
 use rusqlite::types::ToSqlOutput;
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::Error::UserFunctionError as UFE;
-use rusqlite::{named_params, params};
+use rusqlite::{named_params, params, Connection};
 use serde_json::json;
-use std::io::Write;
+use std::{io::Write, sync::Arc};
 use zstd::dict::EncoderDictionary;
 
 struct ZstdTrainDictAggregate;
@@ -27,15 +26,12 @@ impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdT
         state: &mut Option<ZstdTrainDictState>,
     ) -> rusqlite::Result<()> {
         if let None = state {
-            std::mem::replace(
-                state,
-                Some(ZstdTrainDictState {
-                    reservoir: vec![],
-                    wanted_item_count: ctx.get::<f64>(2)? as usize,
-                    wanted_dict_size: ctx.get::<i64>(1)? as usize,
-                    total_count: 0,
-                }),
-            );
+            state.replace(ZstdTrainDictState {
+                reservoir: vec![],
+                wanted_item_count: ctx.get::<f64>(2)? as usize,
+                wanted_dict_size: ctx.get::<i64>(1)? as usize,
+                total_count: 0,
+            });
         }
         let mut state = state.as_mut().unwrap();
         let cur = match ctx.get_raw(0) {
@@ -70,7 +66,8 @@ impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdT
                 state.reservoir.len()
             );
             let dict = zstd::dict::from_samples(&state.reservoir, state.wanted_dict_size)
-                .map_err(|e| UFE(Box::new(e)))?;
+                .context("training dict")
+                .map_err(ah)?;
             Ok(Value::Blob(dict))
         } else {
             Ok(Value::Null)
@@ -96,7 +93,7 @@ fn wrap_encoder_dict<'a>(dict_raw: Vec<u8>, level: i32) -> OwnedEncoderDict<'a> 
 /// sqlite sadly does not do auxdata caching for subqueries like `zstd_compress(data, 3, (select dict from _zstd_dicts where id = 4))`
 /// so instead we support the syntax `zstd_compress(data, 3, 4)` as an alias to the above
 /// if the dict parameter is a number, the dict will be queried from the _zstd_dicts table and cached in sqlite auxdata
-/// so it is oly constructed once per query
+/// so it is only constructed once per query
 ///
 /// this function is not 100% correct because the level is passed separately from the dictionary but the dictionary is cached in the aux data of the dictionary parameter
 /// e.g. `select zstd_compress(tbl.data, tbl.row_compression_level, 123) from tbl` will probably compress all the data with the same compression ratio instead of a random one
@@ -106,7 +103,7 @@ fn encoder_dict_from_ctx<'a>(
     ctx: &'a Context,
     arg_index: usize,
     level: i32,
-) -> rusqlite::Result<&'a OwnedEncoderDict<'a>> {
+) -> rusqlite::Result<Arc<OwnedEncoderDict<'a>>> {
     Ok(match ctx.get_aux::<OwnedEncoderDict>(arg_index as i32)? {
         Some(d) => d,
         None => {
@@ -115,7 +112,7 @@ fn encoder_dict_from_ctx<'a>(
             match ctx.get_raw(arg_index) {
                 ValueRef::Blob(b) => b.to_vec(),
                 ValueRef::Integer(i) => {
-                    let db = ctx.get_connection()?;
+                    let db = unsafe { ctx.get_connection()? };
                     let res: Vec<u8> = db.query_row(
                         "select dict from _zstd_dicts where id = ?",
                         params![i],
@@ -129,7 +126,7 @@ fn encoder_dict_from_ctx<'a>(
                 ))?,
             };
             let dict = wrap_encoder_dict(dict_raw, level);
-            ctx.set_aux(arg_index as i32, dict);
+            ctx.set_aux(arg_index as i32, dict)?;
             ctx.get_aux::<OwnedEncoderDict>(arg_index as i32)?.unwrap()
         }
     })
@@ -165,21 +162,26 @@ fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
             Some(dict) => zstd::stream::write::Encoder::with_prepared_dictionary(out, &dict),
             None => zstd::stream::write::Encoder::new(out, level),
         }
-        .map_err(|e| UFE(Box::new(e)))?;
+        .context("creating zstd encoder")
+        .map_err(ah)?;
         encoder
             .write_all(input_value)
-            .map_err(|e| UFE(Box::new(e)))?;
-        encoder.write_all(is_blob).map_err(|e| UFE(Box::new(e)))?;
-        encoder.finish()
+            .context("writing data to zstd encoder")
+            .map_err(ah)?;
+        encoder.write_all(is_blob).context("blob").map_err(ah)?;
+        encoder
+            .finish()
+            .context("finishing zstd stream")
+            .map_err(ah)?
     };
-    Ok(Box::new(res.map_err(|e| UFE(Box::new(e)))?))
+    Ok(Box::new(res))
 }
 
 fn zstd_decompress<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
     let input_value = match ctx.get_raw(0) {
         ValueRef::Blob(b) => b,
         ValueRef::Text(_b) => {
-            return Err(UFE(anyhow::anyhow!(
+            return Err(ah(anyhow::anyhow!(
                 "got string, but zstd compressed data is always blob"
             )
             .into()))
@@ -202,11 +204,13 @@ fn zstd_decompress<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error
             Some(dict) => zstd::stream::write::Decoder::with_dictionary(out, &dict),
             None => zstd::stream::write::Decoder::new(out),
         }
-        .map_err(|_e| UFE(anyhow::anyhow!("dict load doesn't work").into()))?;
+        .context("dict load doesn't work")
+        .map_err(ah)?;
         decoder
             .write_all(input_value)
-            .map_err(|e| UFE(Box::new(e)))?;
-        decoder.flush().map_err(|e| UFE(Box::new(e)))?;
+            .context("decoding")
+            .map_err(ah)?;
+        decoder.flush().context("decoder flushing").map_err(ah)?;
         decoder.into_inner()
     };
 
@@ -215,7 +219,9 @@ fn zstd_decompress<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error
         Ok(ToSqlOutput::Owned(Value::Blob(vec)))
     } else {
         Ok(ToSqlOutput::Owned(Value::Text(
-            unsafe { String::from_utf8_unchecked(vec) }, // converted right back to &u8 in https://docs.rs/rusqlite/0.21.0/src/rusqlite/types/value_ref.rs.html#107
+            // converted right back to &u8 in https://docs.rs/rusqlite/0.21.0/src/rusqlite/types/value_ref.rs.html#107
+            // so we don't want the overhead of checking utf8
+            unsafe { String::from_utf8_unchecked(vec) },
         )))
     }
     // let dictionary
@@ -234,7 +240,9 @@ fn debug_row(r: &rusqlite::Row) {
     println!("");
 }
 
-// to dumb for recursive macros
+/// format an expression while escaping given values as sqlite identifiers
+/// needed since prepared query parameters can't be used in identifier position
+/// (i'm too dumb for recursive macros)
 macro_rules! format_sqlite {
     ($x:expr) => {
         format!($x)
@@ -259,6 +267,24 @@ macro_rules! format_sqlite {
     };
 }
 
+#[derive(Debug)]
+struct ColumnInfo {
+    name: String,
+    coltype: String,
+    is_primary_key: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TransparentCompressConfig {
+    column: String,
+    compression_level: i8,
+    // sql expression that chooses which dict to use
+    dict_chooser: String,
+}
+
+fn ah(e: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::UserFunctionError(format!("{:#?}", e).into())
+}
 ///
 /// enables transparent row-level compression for a table with the following steps:
 ///
@@ -267,76 +293,96 @@ macro_rules! format_sqlite {
 /// 3. creates a view called tablename that mirrors _tablename_zstd except it decompresses the compressed column on the fly
 /// 4. creates INSERT, UPDATE and DELETE triggers on the view so they affect the backing table instead
 ///
+/// Warning: this function assumes trusted input, it is not sql injection safe!
 fn zstd_enable_transparent<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
     let table_name: String = ctx.get(0)?;
     let new_table_name = format!("_{}_zstd", table_name);
-    let column_name: String = ctx.get(1)?;
-    let db = &mut ctx.get_connection()?;
-    let db = db.transaction()?;
+    let config: TransparentCompressConfig = serde_json::from_str(&ctx.get::<String>(1)?)
+        .context("parsing config")
+        .map_err(ah)?;
+    let db = &mut unsafe { ctx.get_connection()? };
+    let db = db.unchecked_transaction()?;
 
-    let columns_info: Vec<(String, bool)> = db
+    let columns_info: Vec<ColumnInfo> = db
         .prepare(&format_sqlite!(r#"pragma table_info({})"#, &table_name))?
         .query_map(params![], |row| {
-            Ok((
-                row.get::<&str, String>("name")?,
-                row.get::<&str, bool>("pk")?,
-            ))
+            Ok(ColumnInfo {
+                name: row.get("name")?,
+                is_primary_key: row.get("pk")?,
+                coltype: row.get("type")?,
+            })
         })?
         .collect::<Result<_, rusqlite::Error>>()?;
-    let columns: Vec<String> = columns_info.iter().map(|e| e.0.clone()).collect();
-    let primary_key_columns: Vec<String> = columns_info
+
+    // primary key columns. these will be used to index the table in the modifying triggers
+    let primary_key_columns: Vec<&ColumnInfo> =
+        columns_info.iter().filter(|e| e.is_primary_key).collect();
+
+    if columns_info.len() == 0 {
+        return Err(ah(anyhow::anyhow!("Table {} does not exist", table_name)));
+    }
+    let column_name = &config.column;
+
+    let to_compress_column = columns_info
         .iter()
-        .filter(|e| e.1)
-        .map(|e| e.0.clone())
-        .collect();
-    if columns.len() == 0 {
-        return Err(UFE(
-            anyhow::anyhow!("Table {} does not exist", table_name).into()
-        ));
+        .find(|e| &e.name == column_name)
+        .with_context(|| format!("Column {} does not exist in {}", column_name, table_name))
+        .map_err(ah)?;
+    if to_compress_column.is_primary_key {
+        return Err(ah(anyhow::anyhow!("Can't compress column {} since it is part of primary key (this could probably be supported, but currently isn't)", column_name).into()));
     }
-    if !columns.contains(&column_name) {
-        return Err(UFE(anyhow::anyhow!(
-            "Column {} does not exist in {}",
-            column_name,
-            table_name
-        )
-        .into()));
-    }
-    println!("cols={:?}", columns);
+    let dict_id_column_name = format!("_{}_dict", to_compress_column.name);
+    eprintln!("cols={:?}", columns_info);
     {
         // can't use prepared statement at these positions
-        let rename_query = format_sqlite!(
-            r#"alter table {} rename to {}"#,
-            &table_name,
-            &new_table_name
-        );
+        let rename_query =
+            format_sqlite!("alter table {} rename to {}", &table_name, &new_table_name);
         eprintln!("[run] {}", &rename_query);
-        /*for row in */
-        match db.prepare(&rename_query)?.query(params![])?.next()? {
-            None => {}
-            Some(r) => {
-                debug_row(r);
-                return Err(UFE(anyhow::anyhow!(
-                    "unexpected row returned from alter table"
-                )
-                .into()));
-            }
-        }
+        db.execute(&rename_query, params![])?;
 
         db.execute(
             "
             create table if not exists _zstd_dicts (
+                id integer not null primary key autoincrement,
+                chooser_key text unique not null,
+                dict blob not null
+            );",
+            params![],
+        )?;
+
+        db.execute(
+            "
+            create table if not exists _zstd_configs (
                 id integer not null primary key autoincrement,
                 meta json not null,
                 dict blob not null
             );",
             params![],
         )?;
+
+        db.execute(
+            &format_sqlite!(
+                "alter table {} add column {} integer references _zstd_dicts(id)",
+                &new_table_name,
+                &dict_id_column_name
+            ),
+            params![],
+        )?;
+
+        db.execute(
+            &format_sqlite!(
+                "create index {} on {} ({})",
+                &format!("{}_idx", &dict_id_column_name),
+                &new_table_name,
+                &dict_id_column_name
+            ),
+            params![],
+        )?;
     }
 
-    let dict_size = 100000; // 100kB is the default
+    /*let dict_size = 1_000_000; // 100kB is the default
     let group_by = "null";
-    let compression_level = 0; // 0 = default = 3
+    let compression_level = 19; // 0 = default = 3
     let dict_rowid = {
         // we use sample_count = select dict_size * 100 / avg(length(data))
         // because the zstd docs recommend using around 100x the target dictionary size of data to train the dictionary
@@ -344,14 +390,14 @@ fn zstd_enable_transparent<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlit
             insert into _zstd_dicts (meta,dict) values (:meta,
                 (select zstd_train_dict({0}, :dict_size, (select :dict_size * 100 / avg(length({0})) as sample_count from {1}))
                     as dict from {1})
-            );", &column_name, &new_table_name);
+            );", &new_column_name, &new_table_name);
         eprintln!("[run] {}", &train_query);
-        db.execute_named(
+        db.execute(
             &train_query,
             named_params! {
                 ":meta": serde_json::to_string(&json!({
                     "tbl": table_name,
-                    "col": column_name,
+                    "col": new_column_name,
                     "group_by": group_by,
                     "dict_size": dict_size,
                     "created": chrono::Utc::now().to_rfc3339()
@@ -373,21 +419,21 @@ fn zstd_enable_transparent<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlit
             "compressed {} rows of {}.{}",
             updated, table_name, column_name
         );
-    }
+    }*/
 
     {
-        let select_columns_escaped = columns
+        let select_columns_escaped = columns_info
             .iter()
             .map(|c| {
-                if &column_name == c {
-                    format!(
+                if column_name == &c.name {
+                    format_sqlite!(
                         // prepared statement parameters not allowed in view
-                        "zstd_decompress({}, (select dict from _zstd_dicts where id={})) as {0}",
-                        escape_sqlite_identifier(&column_name),
-                        dict_rowid
+                        "zstd_decompress_col({}, {}) as {0}",
+                        &column_name,
+                        &dict_id_column_name
                     )
                 } else {
-                    format_sqlite!("{}", c)
+                    format_sqlite!("{}", &c.name)
                 }
             })
             .collect::<Vec<String>>()
@@ -407,73 +453,101 @@ fn zstd_enable_transparent<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlit
     }
 
     {
-        let select_columns_escaped = columns
+        // insert trigger
+        let insert_selection = columns_info
             .iter()
             .map(|c| {
-                if &column_name == c {
+                if column_name == &c.name {
                     format!(
                         // prepared statement parameters not allowed in view
-                        "zstd_compress(new.{}, {}, (select dict from _zstd_dicts where id={})) as {0}",
+                        "zstd_compress_col(new.{}, {}, (select dict from _zstd_dicts where chooser_key=({}))) as {0}",
                         escape_sqlite_identifier(&column_name),
-                        compression_level,
-                        dict_rowid
+                        config.compression_level,
+                        config.dict_chooser
                     )
                 } else {
-                    format_sqlite!("new.{}", c)
+                    format_sqlite!("new.{}", &c.name)
                 }
             })
             .collect::<Vec<String>>()
             .join(", ");
         let createtrigger_query = format!(
-            r#"
+            "
             create trigger {}
                 instead of insert on {}
+                for each row
                 begin
                     insert into {} select {};
                 end;
-            "#,
+            ",
             escape_sqlite_identifier(&format!("{}_insert_trigger", table_name)),
             escape_sqlite_identifier(&table_name),
             escape_sqlite_identifier(&new_table_name),
-            select_columns_escaped
+            insert_selection
         );
         eprintln!("[run] {}", &createtrigger_query);
         db.execute(&createtrigger_query, params![])?;
     }
+    // a WHERE statement that selects a row based on the primary key
+    let primary_key_condition = primary_key_columns
+        .iter()
+        .map(|c| format_sqlite!("old.{0} = {0}", &c.name))
+        .collect::<Vec<String>>()
+        .join(" and ");
     {
-        let select_columns_escaped = primary_key_columns
-            .iter()
-            .map(|c| {
-                if &column_name == c {
-                    format!(
-                        // prepared statement parameters not allowed in view
-                        "zstd_compress(old.{}, {}, (select dict from _zstd_dicts where id={})) = {0}",
-                        escape_sqlite_identifier(&column_name),
-                        compression_level,
-                        dict_rowid
-                    )
-                } else {
-                    format_sqlite!("old.{0} = {0}", c)
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(" and ");
-
+        // add delete trigger
         let deletetrigger_query = format!(
-            r#"
-            create trigger {}
-                instead of delete on {}
+            "
+            create trigger {trg_name}
+                instead of delete on {view}
+                for each row
                 begin
-                    delete from {} where {};
+                    delete from {backing_table} where {primary_key_condition};
                 end;
-            "#,
-            escape_sqlite_identifier(&format!("{}_delete_trigger", table_name)),
-            escape_sqlite_identifier(&table_name),
-            escape_sqlite_identifier(&new_table_name),
-            select_columns_escaped
+            ",
+            trg_name = escape_sqlite_identifier(&format!("{}_delete_trigger", table_name)),
+            view = escape_sqlite_identifier(&table_name),
+            backing_table = escape_sqlite_identifier(&new_table_name),
+            primary_key_condition = primary_key_condition
         );
         eprintln!("[run] {}", &deletetrigger_query);
         db.execute(&deletetrigger_query, params![])?;
+    }
+    {
+        for col in &columns_info {
+            let update = if col.name == to_compress_column.name {
+                format_sqlite!(
+                    "{} = zstd_compress_col(new.{}, {})",
+                    &col.name,
+                    &col.name,
+                    &dict_id_column_name
+                )
+            } else {
+                format_sqlite!("{} = new.{}", &col.name, &col.name)
+            };
+            // update triggers
+            let deletetrigger_query = format!(
+                "
+                create trigger {trg_name}
+                    instead of update of {upd_col} on {view_name}
+                    for each row
+                    begin
+                        update {backing_table} set {update} where {primary_key_condition}
+                    end;
+                ",
+                trg_name = escape_sqlite_identifier(&format!(
+                    "{}_update_{}_trigger",
+                    table_name, column_name
+                )),
+                view_name = escape_sqlite_identifier(&table_name),
+                backing_table = escape_sqlite_identifier(&new_table_name),
+                upd_col = escape_sqlite_identifier(&col.name),
+                update = update,
+                primary_key_condition = primary_key_condition
+            );
+            eprintln!("[run] {}", &deletetrigger_query);
+            db.execute(&deletetrigger_query, params![])?;
+        }
     }
     db.commit()?;
     eprintln!("consider running pragma vacuum to clean up old data");
