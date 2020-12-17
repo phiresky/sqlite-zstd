@@ -17,11 +17,17 @@ TODO: describe
 
 -   `zstd_enable_transparent(config)`
 
-    Enable transparent row-level compression of the given column on the given table. A dictionary will be automatically trained on the existing data (so make sure you have some data in there first).
+    Enable transparent row-level compression of the given column on the given table.
 
     The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries.
 
-    `config` is a json object describing the configuration. It has the
+    `config` is a json object describing the configuration. See [TransparentCompressConfig](src/transparent.rs#L34) for detail.
+
+-   `zstd_transparent_maintenance(duration_seconds: float)`
+
+    Perform an incremental maintenance operation taking around the given amount of time.
+    This will train dictionaries and compress data based on the grouping given in the TransparentCompressConfig.
+    Returns 1 if there is more work to be done, 0 if everything is compressed as it should.
 
 -   `zstd_compress(data: text|blob, level: int = 3, dictionary: blob | int | null = null) -> blob`
 
