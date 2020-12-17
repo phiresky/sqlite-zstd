@@ -31,22 +31,36 @@ fn def_train_dict_samples_ratio() -> f32 {
     100.0
 }
 #[derive(serde::Serialize, serde::Deserialize)]
-struct TransparentCompressConfig {
-    table: String,
-    column: String,
-    compression_level: i8,
-    /// sql expression that chooses which dict to use or returns null if data should stay uncompressed for now
-    dict_chooser: String,
+pub struct TransparentCompressConfig {
+    /// the name of the table to which the transparent compression will be applied
+    pub table: String,
+    /// the name of the column
+    pub column: String,
+    /// The compression level. Valid levels are 1-19.
+    /// Compression will be significantly slower when the level is increased, but decompression speed should stay about the same regardless of compression level
+    pub compression_level: i8,
+    /// An SQL expression that chooses which dict to use or returns null if data should stay uncompressed for now
+    /// Examples:
+    ///
+    /// * `strftime(created, '%Y-%m')`
+    ///     this will cause every month of data to be compressed with its own dictionary.
+    ///
+    /// * `nullif(strftime(created, '%Y-%m'), strftime('now', '%Y-%m'))`
+    ///
+    ///     The same as above, but if the entry is from the current month it will stay uncompressed.
+    ///     This is handy because it means that the dictionary for the month will only be created when the month is over
+    ///     and can thus be optimized the most for the given data
+    pub dict_chooser: String,
     #[serde(default = "def_min_dict_size")]
     /// if dictionary size would be smaller than this then don't create a dict
-    min_dict_size_bytes_for_training: i64,
+    pub min_dict_size_bytes_for_training: i64,
     #[serde(default = "def_dict_size_ratio")]
     /// if we see 10MB of data for a specific group, the dict will target a size of ratio * 10MB (default 0.01)
-    dict_size_ratio: f32,
+    pub dict_size_ratio: f32,
     /// for training, we find samples of this factor (default 100)
     /// the default of 100 and 0.01 means that by default the dict will be trained on all of the data
     #[serde(default = "def_train_dict_samples_ratio")]
-    train_dict_samples_ratio: f32,
+    pub train_dict_samples_ratio: f32,
 }
 
 fn pretty_bytes(bytes: i64) -> String {

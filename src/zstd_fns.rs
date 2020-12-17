@@ -71,12 +71,15 @@ fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
     Ok(Box::new(res))
 }
 
+/// special case of the zstd decompression with the following "quirks" for use in transparent row level compression:
+/// 1. if the dict argument is null, it passes through the data without decompressing
+/// 2.
 fn zstd_decompress_col<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
     let arg_data = 0;
     let arg_dict = 1;
     // if the dict id is null, pass through data
     if let ValueRef::Null = ctx.get_raw(arg_dict) {
-        // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context??
+        // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context to avoid copying??
         // return Ok(ToSqlOutput::Borrowed(ctx.get_raw(arg_data)));
         return Ok(ToSqlOutput::Owned(ctx.get_raw(arg_data).into()));
     }

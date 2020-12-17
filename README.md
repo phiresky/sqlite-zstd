@@ -15,13 +15,13 @@ TODO: describe
 
 ## provided sql functions
 
--   `zstd_enable_transparent(table_name, column_name)`
+-   `zstd_enable_transparent(config)`
 
     Enable transparent row-level compression of the given column on the given table. A dictionary will be automatically trained on the existing data (so make sure you have some data in there first).
 
     The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries.
 
-    TODO: allow multiple columns and more exact configuration
+    `config` is a json object describing the configuration. It has the
 
 -   `zstd_compress(data: text|blob, level: int = 3, dictionary: blob | int | null = null) -> blob`
 
@@ -30,9 +30,14 @@ TODO: describe
     if dictionary is a blob it will be directly used
     if dictionary is an int i, it is functionally equivalent to `zstd_compress(data, level, (select dict from _zstd_dict where id = i))`
 
--   `zstd_decompress(data: blob, dictionary: blob | int | null = null) -> text|blob`
+-   `zstd_decompress(data: blob, dictionary: blob | int | null = null, is_text: bool) -> text|blob`
 
     Decompresses the given data. if the dictionary is wrong, the result is undefined
+
+    if dictionary is a blob it will be directly used
+    if dictionary is an int i, it is functionally equivalent to `zstd_decompress(data, (select dict from _zstd_dict where id = i))`
+
+    is_text specifies whether to output the data as text or as a blob. Note that when outputting as text the encoding depends on the sqlite database encoding.
 
 -   `zstd_train_dict(agg, dict_size: int, sample_count: int) -> blob`
 
