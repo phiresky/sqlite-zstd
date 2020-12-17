@@ -59,3 +59,12 @@ TODO: describe
 -   do compression in different thread(s) for performance (may be as easy as using .multithread(1) in zstd)
 -   type affinity interfers with int pass through - `insert into compressed (col) values (1)` will result in typeof(col) = text instead of integer if the type of the column was declared as text - which in turns causes decompression to fail with "got string, but zstd compressed data is always blob"
     -   either change the type of the compressed column to blob or similar or disallow integer passthrough
+
+select zstd_enable_transparent('{"table": "events", "column": "data", "compression_level": 19, "dict_chooser": "case when date(timestamp, ''weekday 0'') < date(''now'', ''weekday 0'') then data_type || ''.'' || date(timestamp, ''weekday 0'') else null end"}');
+
+select
+case when date(timestamp, 'weekday 0') < date('now', 'weekday 0')
+then data_type || '.' || date(timestamp, 'weekday 0')
+else null
+END
+from events limit 10000

@@ -1,7 +1,12 @@
-use anyhow;
+#![warn(clippy::print_stdout)]
+#![warn(clippy::print_stdout)]
+
 use rusqlite::ffi;
 use std::os::raw::c_int;
 
+mod dict_management;
+mod transparent;
+mod util;
 mod zstd_fns;
 
 // https://www.sqlite.org/loadext.html
@@ -26,18 +31,24 @@ pub extern "C" fn sqlite3_sqlitezstd_init(
      */
     match init(db) {
         Ok(()) => {
-            eprintln!("[sqlite-zstd] initialized");
+            log::debug!("[sqlite-zstd] initialized");
             ffi::SQLITE_OK
         }
         Err(e) => {
-            eprintln!("[sqlite-zstd] init error: {:?}", e);
+            log::debug!("[sqlite-zstd] init error: {:?}", e);
             ffi::SQLITE_ERROR
         }
     }
 }
 
 fn init(db_handle: *mut ffi::sqlite3) -> anyhow::Result<()> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    env_logger::init();
+
     let db = unsafe { rusqlite::Connection::from_handle(db_handle)? };
+
     crate::zstd_fns::add_functions(&db)?;
     Ok(())
 }

@@ -10,18 +10,26 @@ edition = "2018"
 crate-type = ["cdylib"]
 
 [dependencies]
-zstd = "0.5.2"
-anyhow = "1.0.31"
+zstd = "0.5.3"
+anyhow = "1.0.35"
 rand = "0.7.3"
-serde_json = "1.0.53"
-serde = { version = "1.0.111", features = ["derive"] }
-chrono = "0.4.11"
+serde_json = "1.0.60"
+serde = { version = "1.0.118", features = ["derive"] }
+
 owning_ref = "0.4.1"
-names = "0.11.0"
+
+log = "0.4.11"
+env_logger = "0.8.2"
+lazy_static = "1.4.0"
+lru_time_cache = "0.11.3"
 
 [dependencies.rusqlite]
 path = "../rusqlite"
 features = ["functions", "blob", "loadable_extension", "bundled"]
+
+[dev-dependencies]
+chrono = "0.4.19"
+names = "0.11.0"
 
 [dev-dependencies.rusqlite]
 path = "../rusqlite"
