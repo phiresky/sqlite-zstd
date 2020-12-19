@@ -30,14 +30,26 @@ fn def_dict_size_ratio() -> f32 {
 fn def_train_dict_samples_ratio() -> f32 {
     100.0
 }
+fn def_incremental_compression_step_bytes() -> i64 {
+    // https://github.com/facebook/zstd/blob/dev/doc/images/CSpeed2.png
+    // about 5MB/s at level 19
+    5_000_000
+}
+fn def_target_db_load() -> f32 {
+    0.3
+}
+
+/// This is the configuration of the transparent compression for one column of one table.
+/// It is safe to change every property of this configuration at any time (except for table and column), but data that is already compressed will not be recompressed with the new settings.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransparentCompressConfig {
-    /// the name of the table to which the transparent compression will be applied
+    /// the name of the table to which the transparent compression will be applied. It will be renamed to _tblname_zstd and replaced with a editable view.
     pub table: String,
     /// the name of the column
     pub column: String,
     /// The compression level. Valid levels are 1-19.
-    /// Compression will be significantly slower when the level is increased, but decompression speed should stay about the same regardless of compression level
+    /// Compression will be significantly slower when the level is increased, but decompression speed should stay about the same regardless of compression level.
+    /// That means this is a tradeoff between INSERT vs SELECT performance.
     pub compression_level: i8,
     /// An SQL expression that chooses which dict to use or returns null if data should stay uncompressed for now
     /// Examples:
@@ -52,15 +64,24 @@ pub struct TransparentCompressConfig {
     ///     and can thus be optimized the most for the given data
     pub dict_chooser: String,
     #[serde(default = "def_min_dict_size")]
-    /// if dictionary size would be smaller than this then don't create a dict
+    /// if dictionary size would be smaller than this then no dict will be trained and if no dict exists the data will stay uncompressed
     pub min_dict_size_bytes_for_training: i64,
     #[serde(default = "def_dict_size_ratio")]
-    /// if we see 10MB of data for a specific group, the dict will target a size of ratio * 10MB (default 0.01)
+    /// The target size of the dictionary based on seen data. For example,
+    /// For example if we see 10MB of data for a specific group, the dict will target a size of ratio * 10MB (default 0.01)
     pub dict_size_ratio: f32,
     /// for training, we find samples of this factor (default 100)
     /// the default of 100 and 0.01 means that by default the dict will be trained on all of the data
     #[serde(default = "def_train_dict_samples_ratio")]
     pub train_dict_samples_ratio: f32,
+    /// how many bytes (approximately) to compress at once. By default tuned so at compression level 19 it locks the database for about 1s per step.
+    #[serde(default = "def_incremental_compression_step_bytes")]
+    pub incremental_compression_step_bytes: i64,
+    /// During an incremental maintenance operation, target this ratio of DB load by sleeping between write operations.
+    /// For example: if set to 0.5, after each write operation taking 2 seconds the maintenance function will sleep for 2 seconds so other processes have time to run write operations against the database.
+    /// Note that this is only useful if you run the incremental maintenance function in a separate thread or process than your other logic.
+    #[serde(default = "def_target_db_load")]
+    pub target_db_load: f32,
 }
 
 fn pretty_bytes(bytes: i64) -> String {
@@ -104,6 +125,13 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             })
         })?
         .collect::<Result<_, rusqlite::Error>>()?;
+
+    let journal_mode: String = db
+        .query_row("pragma journal_mode;", params![], |r| r.get(0))
+        .context("querying journal mode")?;
+    if journal_mode != "wal" {
+        log::warn!("Warning: It is recommended to set `pragma journal_mode=WAL;`");
+    }
 
     // primary key columns. these will be used to index the table in the modifying triggers
     let primary_key_columns: Vec<&ColumnInfo> =
@@ -364,7 +392,7 @@ struct TodoInfo {
     count: i64,
     total_bytes: i64,
 }
-pub fn zstd_transparent_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, anyhow::Error> {
+pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, anyhow::Error> {
     let arg_time_limit_seconds = 0;
     let time_limit: f64 = ctx
         .get(arg_time_limit_seconds)
@@ -463,7 +491,10 @@ pub fn zstd_transparent_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                 config.compression_level
             );
             let mut total_updated = 0;
-            let chunk_size = 1000;
+            let mut chunk_size = config.incremental_compression_step_bytes / avg_sample_bytes;
+            if chunk_size < 1 {
+                chunk_size = 1;
+            }
             loop {
                 let updated = db.execute(
                 &format!(
@@ -519,4 +550,57 @@ pub fn zstd_transparent_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
     }
     log::debug!("maintenence complete!");
     Ok(0.into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::{assert_eq, assert_ne};
+    use rusqlite::{Connection, Row};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    fn RowToThong(r: &Row) -> Vec<Value> {
+        (0..r.column_count()).map(|i| r.get_raw(i).into()).collect()
+    }
+
+    fn get_whole_table(db: &Connection, tbl_name: &str) -> anyhow::Result<Vec<Vec<Value>>> {
+        let mut stmt = db.prepare(&format!("select * from {}", tbl_name))?;
+        let q1: Vec<Vec<Value>> = stmt
+            .query_map(params![], |e| Ok(RowToThong(e)))?
+            .collect::<Result<_, rusqlite::Error>>()?;
+        Ok(q1)
+    }
+
+    fn check_table_rows_same(db1: &Connection, db2: &Connection) -> anyhow::Result<()> {
+        let tbl1 = get_whole_table(db1, "events")?;
+        let tbl2 = get_whole_table(db2, "events")?;
+        assert_eq!(tbl1, tbl2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn sanity() -> anyhow::Result<()> {
+        let db1 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
+        let db2 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
+
+        check_table_rows_same(&db1, &db2)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn enable_transparent() -> anyhow::Result<()> {
+        let db1 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
+        let db2 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
+
+        db2.query_row(
+            r#"select zstd_enable_transparent('{"table": "events", "column": "data", "compression_level": 3, "dict_chooser": "1"}')"#,
+            params![],
+            |_| Ok(())
+        ).context("enable transparent")?;
+        check_table_rows_same(&db1, &db2)?;
+
+        Ok(())
+    }
 }

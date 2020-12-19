@@ -16,48 +16,35 @@ pub struct ZstdTrainDictAggregate {
     pub return_save_id: bool,
 }
 pub struct ZstdTrainDictState {
-    // this shouldn't be stored here at all, but rusqlite currently has no context access in finish function. the mutex is really just a hack to allow carrying across unwind boundary
-    db: Mutex<Connection>,
     reservoir: Vec<Vec<u8>>,
     wanted_item_count: usize,
     total_count: usize,
     wanted_dict_size: usize,
-    chooser_key: Option<String>,
+    chooser_key: Option<Option<String>>,
 }
 
-impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdTrainDictAggregate {
-    fn init(&self) -> Option<ZstdTrainDictState> {
-        // TODO: PR to rusqlite library that passes context to init fn
-        None
-    }
-    fn step(
-        &self,
-        ctx: &mut Context,
-        state: &mut Option<ZstdTrainDictState>,
-    ) -> rusqlite::Result<()> {
-        let arg_sample = 0;
+impl rusqlite::functions::Aggregate<ZstdTrainDictState, Value> for ZstdTrainDictAggregate {
+    fn init(&self, ctx: &mut Context) -> rusqlite::Result<ZstdTrainDictState> {
         let arg_dict_size_bytes = 1;
         let arg_sample_count = 2;
         let arg_chooser_key = 3;
-        if state.is_none() {
-            state.replace(ZstdTrainDictState {
-                reservoir: vec![],
-                wanted_item_count: ctx.get::<f64>(arg_sample_count)? as usize,
-                wanted_dict_size: ctx.get::<i64>(arg_dict_size_bytes)? as usize,
-                total_count: 0,
-                db: Mutex::new(unsafe { ctx.get_connection()? }),
-                chooser_key: if self.return_save_id {
-                    Some(ctx.get(arg_chooser_key)?)
-                } else {
-                    None
-                },
-            });
-            log::debug!(
-                "sampling {} values",
-                state.as_ref().map(|e| e.wanted_item_count).unwrap_or(0)
-            );
-        }
-        let mut state = state.as_mut().unwrap();
+        let wanted_item_count = ctx.get::<f64>(arg_sample_count)? as usize;
+        log::debug!("sampling {} values", wanted_item_count);
+        Ok(ZstdTrainDictState {
+            reservoir: vec![],
+            wanted_item_count,
+            wanted_dict_size: ctx.get::<i64>(arg_dict_size_bytes)? as usize,
+            total_count: 0,
+            chooser_key: if self.return_save_id {
+                Some(ctx.get(arg_chooser_key)?)
+            } else {
+                None
+            },
+        })
+    }
+    fn step(&self, ctx: &mut Context, state: &mut ZstdTrainDictState) -> rusqlite::Result<()> {
+        let arg_sample = 0;
+
         let cur = match ctx.get_raw(arg_sample) {
             ValueRef::Blob(b) => b,
             ValueRef::Text(b) => b,
@@ -82,10 +69,13 @@ impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdT
         Ok(())
     }
 
-    fn finalize(&self, state: Option<Option<ZstdTrainDictState>>) -> rusqlite::Result<Value> {
-        let state = state
-            .flatten()
-            .ok_or(ah(anyhow::anyhow!("tried to train zstd dict on zero rows")))?;
+    fn finalize(
+        &self,
+        ctx: &mut Context,
+        state: Option<ZstdTrainDictState>,
+    ) -> rusqlite::Result<Value> {
+        let state =
+            state.ok_or_else(|| ah(anyhow::anyhow!("tried to train zstd dict on zero rows")))?;
         log::debug!(
             "training dict of size {}kB with {} samples (of {} seen)",
             state.wanted_dict_size / 1000,
@@ -96,14 +86,18 @@ impl rusqlite::functions::Aggregate<Option<ZstdTrainDictState>, Value> for ZstdT
             .context("Training dictionary failed")
             .map_err(ah)?;
         if let Some(key) = state.chooser_key {
-            let db = &state.db.lock().unwrap();
-            ensure_dicts_table_exists(db)?;
+            let db = unsafe { ctx.get_connection()? };
+            ensure_dicts_table_exists(&db)?;
             db.execute(
                 "insert into _zstd_dicts (chooser_key,dict) values (?, ?);",
                 params![key, dict],
             )?;
             let id = db.last_insert_rowid();
-            log::debug!("inserted dict into _zstd_dicts with key {}, id {}", key, id);
+            log::debug!(
+                "inserted dict into _zstd_dicts with key {}, id {}",
+                key.as_deref().unwrap_or("null"),
+                id
+            );
             Ok(Value::Integer(id))
         } else {
             Ok(Value::Blob(dict))

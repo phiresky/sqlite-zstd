@@ -12,11 +12,10 @@ use std::{io::Write, sync::Mutex};
     let handle = rusqlite::ffi::sqlite3_context_db_handle(ctx.ctx);
 }*/
 
-fn debug_row(r: &rusqlite::Row) {
-    println!("debugrow");
+pub fn debug_row(r: &rusqlite::Row) {
     let cols = r.column_names();
     for (i, name) in cols.iter().enumerate() {
-        print!("{}={}", name, format_blob(r.get_raw(i)))
+        print!("{}={} ", name, format_blob(r.get_raw(i)))
     }
     println!();
 }

@@ -2,20 +2,27 @@ use crate::transparent::*;
 use crate::util::*;
 use crate::{dict_management::*, dict_training::ZstdTrainDictAggregate};
 use anyhow::Context as AContext;
+use owning_ref::OwningHandle;
 use rand::Rng;
 use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::ToSql;
 use rusqlite::types::ToSqlOutput;
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{params, Connection};
-use std::{io::Write, sync::Mutex};
+use std::{
+    borrow::Borrow,
+    io::Write,
+    ops::DerefMut,
+    sync::{Arc, Mutex},
+};
+use zstd::dict::{DecoderDictionary, EncoderDictionary};
 
 pub fn ensure_dicts_table_exists(db: &Connection) -> rusqlite::Result<()> {
     db.execute(
         "
         create table if not exists _zstd_dicts (
             id integer primary key autoincrement,
-            chooser_key text unique not null,
+            chooser_key text unique,
             dict blob not null
         );",
         params![],
@@ -23,7 +30,7 @@ pub fn ensure_dicts_table_exists(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
+fn zstd_compress(ctx: &Context) -> anyhow::Result<Box<dyn ToSql>> {
     let arg_data = 0;
     let arg_level = 1;
     let arg_dict = 2;
@@ -45,61 +52,111 @@ fn zstd_compress(ctx: &Context) -> Result<Box<dyn ToSql>, rusqlite::Error> {
     let dict = if ctx.len() < 3 {
         // no third argument -> no dict
         None
+    } else if let ValueRef::Blob(d) = ctx.get_raw(arg_dict) {
+        Some(Arc::new(wrap_encoder_dict(d.to_vec(), level)))
     } else {
         Some(encoder_dict_from_ctx(&ctx, arg_dict, level)?)
     };
 
-    let is_blob: &[u8] = if is_blob { b"b" } else { b"s" };
     let res = {
         let out = Vec::new();
-        let mut encoder = match dict {
-            Some(dict) => zstd::stream::write::Encoder::with_prepared_dictionary(out, &dict),
+        let mut encoder = match &dict {
+            Some(dict) => zstd::stream::write::Encoder::with_prepared_dictionary(out, dict),
             None => zstd::stream::write::Encoder::new(out, level),
         }
         .context("creating zstd encoder")
         .map_err(ah)?;
         encoder
+            .include_checksum(false)
+            .context("disable checksums")?;
+        encoder.multithread(1).context("enable multithread")?;
+        encoder
             .write_all(input_value)
             .context("writing data to zstd encoder")
             .map_err(ah)?;
-        encoder.write_all(is_blob).context("blob").map_err(ah)?;
         encoder
             .finish()
             .context("finishing zstd stream")
             .map_err(ah)?
     };
+    drop(dict); // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
     Ok(Box::new(res))
+}
+
+fn zstd_decompress<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<'a>> {
+    let arg_data = 0;
+    let arg_output_text = 1;
+    let arg_dict = 2;
+
+    let output_text: bool = ctx.get(arg_output_text)?;
+
+    let input_value = match ctx.get_raw(arg_data) {
+        ValueRef::Blob(b) => b,
+        e => {
+            anyhow::bail!(
+                "zstd_decompress expects blob as input, got {}",
+                e.data_type()
+            )
+        }
+    };
+
+    let dict = if ctx.len() < 3 {
+        None
+    } else if let ValueRef::Blob(d) = ctx.get_raw(arg_dict) {
+        Some(Arc::new(wrap_decoder_dict(d.to_vec())))
+    } else {
+        Some(decoder_dict_from_ctx(&ctx, arg_dict)?)
+    };
+    let dict_ref = dict.as_ref().map(|e| -> &DecoderDictionary { &e });
+
+    zstd_decompress_inner(input_value, dict_ref, output_text)
 }
 
 /// special case of the zstd decompression with the following "quirks" for use in transparent row level compression:
 /// 1. if the dict argument is null, it passes through the data without decompressing
-/// 2.
-fn zstd_decompress_col<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::Error> {
+/// 2. if the dict argument is -1, no dict will be used
+fn zstd_decompress_col<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<'a>> {
     let arg_data = 0;
-    let arg_dict = 1;
+    let arg_output_text = 1;
+    let arg_dict = 2;
     // if the dict id is null, pass through data
     if let ValueRef::Null = ctx.get_raw(arg_dict) {
         // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context to avoid copying??
         // return Ok(ToSqlOutput::Borrowed(ctx.get_raw(arg_data)));
         return Ok(ToSqlOutput::Owned(ctx.get_raw(arg_data).into()));
     }
+
+    let output_text: bool = ctx.get(arg_output_text)?;
+
     let input_value = match ctx.get_raw(arg_data) {
         ValueRef::Blob(b) => b,
-        ValueRef::Text(_b) => {
-            return Err(ah(anyhow::anyhow!(
-                "got string, but zstd compressed data is always blob"
-            )))
+        e => {
+            anyhow::bail!(
+                "zstd_decompress expects blob as input, got {}",
+                e.data_type()
+            )
         }
-        ValueRef::Real(f) => return Ok(ToSqlOutput::Owned(Value::Real(f))),
-        ValueRef::Integer(i) => return Ok(ToSqlOutput::Owned(Value::Integer(i))),
-        ValueRef::Null => return Ok(ToSqlOutput::Owned(Value::Null)),
     };
 
-    let dict_raw = Some(decoder_dict_from_ctx(&ctx, arg_dict)?);
+    let dict = if let ValueRef::Integer(-1) = ctx.get_raw(arg_dict) {
+        None
+    } else {
+        Some(decoder_dict_from_ctx(&ctx, arg_dict)?)
+    };
 
+    let dict_ref = dict.as_ref().map(|e| -> &DecoderDictionary { &e });
+
+    zstd_decompress_inner(input_value, dict_ref, output_text)
+}
+
+fn zstd_decompress_inner<'a>(
+    input_value: &[u8],
+    dict: Option<&DecoderDictionary>,
+    output_text: bool,
+) -> anyhow::Result<ToSqlOutput<'a>> {
     let mut vec = {
         let out = Vec::new();
-        let mut decoder = match dict_raw {
+        let mut decoder = match &dict {
             Some(dict) => zstd::stream::write::Decoder::with_prepared_dictionary(out, &dict),
             None => zstd::stream::write::Decoder::new(out),
         }
@@ -113,29 +170,37 @@ fn zstd_decompress_col<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>, rusqlite::E
         decoder.into_inner()
     };
 
-    let is_blob = vec.pop().unwrap();
-    if is_blob == b'b' {
-        Ok(ToSqlOutput::Owned(Value::Blob(vec)))
-    } else {
+    dict; // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
+    if output_text {
         Ok(ToSqlOutput::Owned(Value::Text(
             // converted right back to &u8 in https://docs.rs/rusqlite/0.21.0/src/rusqlite/types/value_ref.rs.html#107
-            // so we don't want the overhead of checking utf8
+            // so we don't want the overhead of checking utf8. also db encoding might not be utf8 so ??
             unsafe { String::from_utf8_unchecked(vec) },
         )))
+    } else {
+        Ok(ToSqlOutput::Owned(Value::Blob(vec)))
     }
-    // let dictionary
+}
+
+fn ah_ah<R>(f: impl Fn(&Context) -> anyhow::Result<R>) -> impl Fn(&Context) -> rusqlite::Result<R> {
+    move |ctx| f(ctx).map_err(ah)
 }
 
 pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     let nondeterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY;
     let deterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     //
-    db.create_scalar_function("zstd_compress", 1, deterministic, zstd_compress)?;
-    db.create_scalar_function("zstd_compress", 2, deterministic, zstd_compress)?;
-    db.create_scalar_function("zstd_compress", 3, deterministic, zstd_compress)?;
-    //db.create_scalar_function("zstd_decompress", 1, deterministic, zstd_decompress)?;
-    //db.create_scalar_function("zstd_decompress", 2, deterministic, zstd_decompress)?;
-    db.create_scalar_function("zstd_decompress_col", 2, deterministic, zstd_decompress_col)?;
+    db.create_scalar_function("zstd_compress", 1, deterministic, ah_ah(zstd_compress))?;
+    db.create_scalar_function("zstd_compress", 2, deterministic, ah_ah(zstd_compress))?;
+    db.create_scalar_function("zstd_compress", 3, deterministic, ah_ah(zstd_compress))?;
+    db.create_scalar_function("zstd_decompress", 2, deterministic, ah_ah(zstd_decompress))?;
+    db.create_scalar_function("zstd_decompress", 3, deterministic, ah_ah(zstd_decompress))?;
+    db.create_scalar_function(
+        "zstd_decompress_col",
+        3,
+        deterministic,
+        ah_ah(zstd_decompress_col),
+    )?;
     db.create_aggregate_function(
         "zstd_train_dict",
         3,
@@ -152,20 +217,29 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
             return_save_id: true,
         },
     )?;
-    db.create_scalar_function("zstd_enable_transparent", 1, nondeterministic, |ctx| {
-        zstd_enable_transparent(ctx).map_err(ah)
-    })?;
+    db.create_scalar_function(
+        "zstd_enable_transparent",
+        1,
+        nondeterministic,
+        ah_ah(zstd_enable_transparent),
+    )?;
 
-    db.create_scalar_function("zstd_transparent_maintenance", 1, nondeterministic, |ctx| {
-        zstd_transparent_maintenance(ctx).map_err(ah)
-    })?;
+    db.create_scalar_function(
+        "zstd_incremental_maintenance",
+        1,
+        nondeterministic,
+        ah_ah(zstd_incremental_maintenance),
+    )?;
 
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+    use chrono::TimeZone;
+    pub use pretty_assertions::{assert_eq, assert_ne};
+    use rand::thread_rng;
     use rusqlite::Connection;
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
@@ -186,9 +260,20 @@ mod tests {
         Shutdown,
     }
 
-    fn create_example_db() -> anyhow::Result<Connection> {
-        let mut db = Connection::open_in_memory()?;
-        add_functions(&db)?;
+    pub fn create_example_db(seed: Option<u64>, eles: i32) -> anyhow::Result<Connection> {
+        let seed = seed.unwrap_or(thread_rng().gen());
+        lazy_static::lazy_static! {
+            // people use maybe 100 different apps
+            static ref app_names: Vec<String> = names::Generator::with_naming(names::Name::Plain)
+            .take(100)
+            .collect();
+            // of maybe 10 different categories
+            static ref app_types: Vec<String> = names::Generator::with_naming(names::Name::Plain)
+                .take(10)
+                .collect();
+        };
+        let mut db = Connection::open_in_memory().context("opening memory db")?;
+        add_functions(&db).context("adding functions")?;
         db.execute_batch(
             "
             create table events (
@@ -199,14 +284,6 @@ mod tests {
         ",
         )?;
 
-        // people use maybe 100 different apps
-        let app_names: Vec<String> = names::Generator::with_naming(names::Name::Plain)
-            .take(100)
-            .collect();
-        // of maybe 10 different categories
-        let app_types: Vec<String> = names::Generator::with_naming(names::Name::Plain)
-            .take(10)
-            .collect();
         use rand::distributions::WeightedIndex;
         use rand::prelude::*;
 
@@ -240,11 +317,11 @@ mod tests {
             (240, "WM_STATE"),
         ];
 
-        let mut rng = thread_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let event_type_dist = WeightedIndex::new(&[10, 10, 1])?;
         let window_properties_dist = WeightedIndex::new(window_properties.iter().map(|e| e.0))?;
         let app_id_dist = rand::distributions::Uniform::from(0..100);
-        let data = (1..100000).map(|_| match event_type_dist.sample(&mut rng) {
+        let data = (0..eles).map(|_| match event_type_dist.sample(&mut rng) {
             0 => {
                 let mut properties = BTreeMap::new();
                 for _i in 1..rand::distributions::Uniform::from(5..20).sample(&mut rng) {
@@ -266,29 +343,219 @@ mod tests {
         });
         {
             let tx = db.transaction()?;
-            let mut insert = tx.prepare("insert into events (timestamp, data) values (?, ?, ?)")?;
-            for d in data {
-                insert.execute(params![
-                    chrono::Utc::now().to_rfc3339(),
-                    serde_json::to_string_pretty(&d)?
-                ])?;
+            {
+                let mut insert =
+                    tx.prepare("insert into events (timestamp, data) values (?, ?)")?;
+                let date = chrono::Utc.ymd(2021, 1, 1).and_hms(0, 0, 0);
+                for (i, d) in data.enumerate() {
+                    insert.execute(params![
+                        (date + chrono::Duration::seconds(30) * (i as i32)).to_rfc3339(),
+                        serde_json::to_string_pretty(&d)?
+                    ])?;
+                }
             }
+            tx.commit()?;
         }
         Ok(db)
     }
 
     #[test]
     fn sanity() -> anyhow::Result<()> {
-        let _db = create_example_db()?;
+        let _db = create_example_db(None, 10).context("create eg db")?;
+        Ok(())
+    }
+
+    fn test_strings() -> anyhow::Result<Vec<String>> {
+        let data = vec![
+            "hello this is a test",
+            "foobar",
+            "looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong",
+            "nope",
+        ];
+        Ok(data.iter().map(|e| e.to_string()).collect())
+    }
+
+    #[test]
+    fn compress_is_deterministic() -> anyhow::Result<()> {
+        let db = create_example_db(None, 0)?;
+
+        for eg in test_strings()? {
+            let compressed1: Vec<u8> =
+                db.query_row("select zstd_compress(?)", params![eg], |r| r.get(0))?;
+            let compressed2: Vec<u8> =
+                db.query_row("select zstd_compress(?)", params![eg], |r| r.get(0))?;
+            assert_eq!(compressed1, compressed2)
+        }
 
         Ok(())
     }
-    //
-    // check that zstd_enable_transparent only creates one dictionary on the full table UPDATE
 
-    //
-    // check that `insert into events values ('a', 'b', 'c', 'd', 'e', 'f'), ('b', 'c', 'd', 'e', 'f', 'g');`
-    // only creates one dictionary
+    #[test]
+    fn compress_decompress_roundtrip() -> anyhow::Result<()> {
+        let db = create_example_db(None, 0)?;
 
-    // check that decompress only creates one dictionary
+        for eg in test_strings()? {
+            let compressed: Vec<u8> = db
+                .query_row("select zstd_compress(?)", params![eg], |r| r.get(0))
+                .context("compressing")?;
+            let decompressed: String = db
+                .query_row(
+                    "select zstd_decompress(?, true)",
+                    params![compressed],
+                    |r| r.get(0),
+                )
+                .context("decompressing")?;
+            assert_eq!(eg, decompressed)
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn decompress_type() -> anyhow::Result<()> {
+        let db = create_example_db(None, 0)?;
+
+        for eg in test_strings()? {
+            let compressed: Vec<u8> =
+                db.query_row("select zstd_compress(?)", params![eg], |r| r.get(0))?;
+            let decompressed_text: String = db.query_row(
+                "select zstd_decompress(?, true)",
+                params![compressed],
+                |r| r.get(0),
+            )?;
+
+            let decompressed_blob: Vec<u8> = db.query_row(
+                "select zstd_decompress(?, false)",
+                params![compressed],
+                |r| r.get(0),
+            )?;
+            assert_eq!(decompressed_text.as_bytes(), decompressed_blob)
+        }
+
+        Ok(())
+    }
+    #[test]
+    fn compress_with_dict_smaller() -> anyhow::Result<()> {
+        let db = create_example_db(None, 100)?;
+
+        let compressed1: Vec<u8> = db.query_row(
+            "select zstd_compress((select data from events where id = 1), 5)",
+            params![],
+            |r| r.get(0),
+        )?;
+
+        let dict: Vec<u8> = db
+            .query_row(
+                "select zstd_train_dict(data, 1000, 100) from events",
+                params![],
+                |r| r.get(0),
+            )
+            .context("train dict")?;
+
+        let compressed2: Vec<u8> = db
+            .query_row(
+                "select zstd_compress((select data from events where id = 1), 5, ?)",
+                params![dict],
+                |r| r.get(0),
+            )
+            .context("compress with dict")?;
+
+        assert!(compressed1.len() > compressed2.len());
+
+        let decompressed1: String = db
+            .query_row("select zstd_decompress(?, 1)", params![compressed1], |r| {
+                r.get(0)
+            })
+            .context("decompress 1")?;
+
+        let decompressed2: String = db
+            .query_row(
+                "select zstd_decompress(?, 1, ?)",
+                params![compressed2, dict],
+                |r| r.get(0),
+            )
+            .context("decompress 2")?;
+
+        assert_eq!(decompressed1, decompressed2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn dict_saving_works() -> anyhow::Result<()> {
+        let db = create_example_db(None, 100)?;
+
+        let dict: i32 = db
+            .query_row(
+                "select zstd_train_dict_and_save(data, 1000, 100, null) from events",
+                params![],
+                |r| r.get(0),
+            )
+            .context("train dict")?;
+
+        let uncompressed: String = db
+            .query_row("select data from events where id = 1", params![], |r| {
+                r.get(0)
+            })
+            .context("get data")?;
+
+        let compressed2: Vec<u8> = db
+            .query_row(
+                "select zstd_compress((select data from events where id = 1), 5, ?)",
+                params![dict],
+                |r| r.get(0),
+            )
+            .context("compress with dict")?;
+
+        let decompressed2: String = db
+            .query_row(
+                "select zstd_decompress(?, 1, ?)",
+                params![compressed2, dict],
+                |r| r.get(0),
+            )
+            .context("decompress 2")?;
+
+        assert_eq!(uncompressed, decompressed2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn levels() -> anyhow::Result<()> {
+        let db = create_example_db(None, 5)?;
+        /*db.prepare("select * from events")?
+        .query_map(params![], |r| Ok(debug_row(r)))?
+        .count();*/
+
+        let mut st = db.prepare("select data from events")?;
+        let eles: Vec<String> = st
+            .query_map(params![], |r| r.get(0))
+            .context("get sample")?
+            .collect::<Result<_, _>>()?;
+
+        for ele in eles {
+            // let mut last_size = usize::MAX;
+            for level in 1..24 {
+                let compressed1: Vec<u8> = db
+                    .query_row("select zstd_compress(?, ?)", params![ele, level], |r| {
+                        r.get(0)
+                    })
+                    .context("compress")?;
+                let decompressed1: String = db
+                    .query_row(
+                        "select zstd_decompress(?, ?)",
+                        params![compressed1, 1],
+                        |r| r.get(0),
+                    )
+                    .context("decompress")?;
+
+                assert_eq!(ele, decompressed1);
+                println!("l={}, size={}", level, compressed1.len());
+                // assert!(compressed1.len() <= last_size);
+                // last_size = compressed1.len();
+            }
+        }
+
+        Ok(())
+    }
 }

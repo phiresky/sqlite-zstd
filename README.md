@@ -36,12 +36,15 @@ TODO: describe
     if dictionary is a blob it will be directly used
     if dictionary is an int i, it is functionally equivalent to `zstd_compress(data, level, (select dict from _zstd_dict where id = i))`
 
--   `zstd_decompress(data: blob, dictionary: blob | int | null = null, is_text: bool) -> text|blob`
+-   `zstd_decompress(data: blob, is_text: bool, dictionary: blob | int | null = null) -> text|blob`
 
     Decompresses the given data. if the dictionary is wrong, the result is undefined
 
-    if dictionary is a blob it will be directly used
-    if dictionary is an int i, it is functionally equivalent to `zstd_decompress(data, (select dict from _zstd_dict where id = i))`
+    If dictionary is a blob it will be directly used
+    If dictionary is an int i, it is functionally equivalent to `zstd_decompress(data, (select dict from _zstd_dict where id = i))`.
+    If dictionary is not present or null, it is assumed the data was compressed without a dictionary.
+
+    Note that passing dictionary as an int is recommended, since then the dictionary only has to be prepared once.
 
     is_text specifies whether to output the data as text or as a blob. Note that when outputting as text the encoding depends on the sqlite database encoding.
 
@@ -58,11 +61,13 @@ TODO: describe
                     as dict from tbl
     ```
 
+    Note that dict_size and sample_count are assumed to be constants.
+
 # Future Work / Ideas / Todo
 
 -   tests
--   allow compression dict by grouping by other column (maybe unnecessary)
 -   reduce header size of zstd compressed columns (currently makes the whole thing only worth it for fairly large columns)
+    -   Remove Magic Bytes
     -   ContentSizeFlag
     -   ChecksumFlag
     -   DictIdFlag

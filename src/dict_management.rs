@@ -9,7 +9,7 @@ type OwnedEncoderDict<'a> = owning_ref::OwningHandle<Vec<u8>, Box<EncoderDiction
 // zstd-rs only exposes zstd_safe::create_cdict_by_reference, not zstd_safe::create_cdict
 // so we need to keep a reference to the vector ourselves
 // is there a better way?
-fn wrap_encoder_dict(dict_raw: Vec<u8>, level: i32) -> OwnedEncoderDict<'static> {
+pub fn wrap_encoder_dict(dict_raw: Vec<u8>, level: i32) -> OwnedEncoderDict<'static> {
     owning_ref::OwningHandle::new_with_fn(dict_raw, |d| {
         Box::new(EncoderDictionary::new(
             unsafe { d.as_ref() }.unwrap(),
@@ -23,12 +23,13 @@ type OwnedDecoderDict<'a> = owning_ref::OwningHandle<Vec<u8>, Box<DecoderDiction
 // zstd-rs only exposes zstd_safe::create_cdict_by_reference, not zstd_safe::create_cdict
 // so we need to keep a reference to the vector ourselves
 // is there a better way?
-fn wrap_decoder_dict(dict_raw: Vec<u8>) -> OwnedDecoderDict<'static> {
+pub fn wrap_decoder_dict(dict_raw: Vec<u8>) -> OwnedDecoderDict<'static> {
     owning_ref::OwningHandle::new_with_fn(dict_raw, |d| {
         Box::new(DecoderDictionary::new(unsafe { &*d }))
     })
 }
-
+// TODO: the rust interface currently requires a level when preparing a dictionary, but the zstd interface (ZSTD_CCtx_loadDictionary) does not.
+// TODO: Using LruCache here isn't very smart
 pub fn encoder_dict_from_ctx<'a, 'b>(
     ctx: &'a Context,
     arg_index: usize,
