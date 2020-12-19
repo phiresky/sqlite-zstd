@@ -1,7 +1,8 @@
+use anyhow::Context as AContext;
 use rusqlite::{functions::Context, params};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use std::{cell::RefCell, collections::HashMap};
+
 use zstd::dict::{DecoderDictionary, EncoderDictionary};
 
 type OwnedEncoderDict<'a> = owning_ref::OwningHandle<Vec<u8>, Box<EncoderDictionary<'a>>>;
@@ -34,7 +35,7 @@ pub fn encoder_dict_from_ctx<'a, 'b>(
     ctx: &'a Context,
     arg_index: usize,
     level: i32,
-) -> rusqlite::Result<Arc<OwnedEncoderDict<'static>>> {
+) -> anyhow::Result<Arc<OwnedEncoderDict<'static>>> {
     use lru_time_cache::LruCache;
 
     lazy_static::lazy_static! {
@@ -49,11 +50,13 @@ pub fn encoder_dict_from_ctx<'a, 'b>(
                 level
             );
             let db = unsafe { ctx.get_connection()? };
-            let dict_raw: Vec<u8> = db.query_row(
-                "select dict from _zstd_dicts where id = ?",
-                params![id],
-                |r| r.get(0),
-            )?;
+            let dict_raw: Vec<u8> = db
+                .query_row(
+                    "select dict from _zstd_dicts where id = ?",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .with_context(|| format!("getting dict with id={} from _zstd_dicts", id))?;
             let dict = wrap_encoder_dict(dict_raw, level);
             Arc::new(dict)
         }),
@@ -66,7 +69,7 @@ pub fn encoder_dict_from_ctx<'a, 'b>(
 pub fn decoder_dict_from_ctx<'a, 'b>(
     ctx: &'a Context,
     arg_index: usize,
-) -> rusqlite::Result<Arc<OwnedDecoderDict<'static>>> {
+) -> anyhow::Result<Arc<OwnedDecoderDict<'static>>> {
     use lru_time_cache::LruCache;
 
     lazy_static::lazy_static! {
@@ -80,11 +83,13 @@ pub fn decoder_dict_from_ctx<'a, 'b>(
                 id
             );
             let db = unsafe { ctx.get_connection()? };
-            let dict_raw: Vec<u8> = db.query_row(
-                "select dict from _zstd_dicts where id = ?",
-                params![id],
-                |r| r.get(0),
-            )?;
+            let dict_raw: Vec<u8> = db
+                .query_row(
+                    "select dict from _zstd_dicts where id = ?",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .with_context(|| format!("getting dict with id={} from _zstd_dicts", id))?;
             let dict = wrap_decoder_dict(dict_raw);
             Arc::new(dict)
         }),

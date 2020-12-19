@@ -29,14 +29,17 @@ TODO: describe
     This will train dictionaries and compress data based on the grouping given in the TransparentCompressConfig.
     Returns 1 if there is more work to be done, 0 if everything is compressed as it should.
 
--   `zstd_compress(data: text|blob, level: int = 3, dictionary: blob | int | null = null) -> blob`
+-   `zstd_compress(data: text|blob, level: int = 3, dictionary: blob | int | null = null, compact: bool = false) -> blob`
 
     Compresses the given data, with the compression level (1 - 22, default 3)
 
     if dictionary is a blob it will be directly used
     if dictionary is an int i, it is functionally equivalent to `zstd_compress(data, level, (select dict from _zstd_dict where id = i))`
 
--   `zstd_decompress(data: blob, is_text: bool, dictionary: blob | int | null = null) -> text|blob`
+    if compact is true, the output will be without magic header, without chekcsums, and without dictids. This will save 4 bytes when not using dictionaries and 8 bytes when using dictionaries.
+    the same must also be passed to the decompress function
+
+-   `zstd_decompress(data: blob, is_text: bool, dictionary: blob | int | null = null, compact: bool = false) -> text|blob`
 
     Decompresses the given data. if the dictionary is wrong, the result is undefined
 
@@ -47,6 +50,8 @@ TODO: describe
     Note that passing dictionary as an int is recommended, since then the dictionary only has to be prepared once.
 
     is_text specifies whether to output the data as text or as a blob. Note that when outputting as text the encoding depends on the sqlite database encoding.
+
+    compact must be specified when the compress function was also called with compact.
 
 -   `zstd_train_dict(agg, dict_size: int, sample_count: int) -> blob`
 

@@ -1,18 +1,13 @@
-use crate::{dict_management::*, util::*, zstd_fns::*, *};
+use crate::{util::*, zstd_fns::*, *};
 use anyhow::Context as AContext;
-use rand::Rng;
-use rusqlite::functions::{Context, FunctionFlags};
-use rusqlite::types::ToSql;
+
+use rusqlite::functions::Context;
+
 use rusqlite::types::ToSqlOutput;
-use rusqlite::types::{Value, ValueRef};
+use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
-use rusqlite::{named_params, params, Connection};
-use std::{
-    collections::HashMap,
-    io::Write,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use rusqlite::{named_params, params};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 struct ColumnInfo {
@@ -96,6 +91,30 @@ fn pretty_bytes(bytes: i64) -> String {
     }
 }
 
+#[derive(Debug)]
+enum SqliteAffinity {
+    Integer,
+    Text,
+    Blob,
+    Real,
+    Numeric,
+}
+/// determine affinity, algorithm described at https://www.sqlite.org/draft/datatype3.html#determination_of_column_affinity
+fn get_column_affinity(declared_type: &str) -> SqliteAffinity {
+    use SqliteAffinity::*;
+    let typ = declared_type.to_ascii_lowercase();
+    if typ.contains("int") {
+        Integer
+    } else if typ.contains("char") || typ.contains("clob") || typ.contains("text") {
+        Text
+    } else if typ.contains("blob") || typ == "" {
+        Blob
+    } else if typ.contains("real") || typ.contains("floa") || typ.contains("doub") {
+        Real
+    } else {
+        Numeric
+    }
+}
 ///
 /// enables transparent row-level compression for a table with the following steps:
 ///
@@ -125,12 +144,20 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             })
         })?
         .collect::<Result<_, rusqlite::Error>>()?;
-
-    let journal_mode: String = db
-        .query_row("pragma journal_mode;", params![], |r| r.get(0))
-        .context("querying journal mode")?;
-    if journal_mode != "wal" {
-        log::warn!("Warning: It is recommended to set `pragma journal_mode=WAL;`");
+    {
+        // warnings
+        let journal_mode: String = db
+            .query_row("pragma journal_mode;", params![], |r| r.get(0))
+            .context("querying journal mode")?;
+        if journal_mode != "wal" {
+            log::warn!("Warning: It is recommended to set `pragma journal_mode=WAL;`");
+        }
+        let vacuum_mode: i32 = db
+            .query_row("pragma auto_vacuum;", params![], |r| r.get(0))
+            .context("querying vacuum mode")?;
+        if vacuum_mode != 1 && vacuum_mode != 2 {
+            log::warn!("Warning: It is recommended to set `pragma auto_vacuum=full;`");
+        }
     }
 
     // primary key columns. these will be used to index the table in the modifying triggers
@@ -146,6 +173,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             table_name
         );
     }
+
     let column_name = &config.column;
 
     let to_compress_column = columns_info
@@ -155,6 +183,12 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     if to_compress_column.is_primary_key {
         anyhow::bail!("Can't compress column {} since it is part of primary key (this could probably be supported, but currently isn't)", column_name);
     }
+
+    let affinity_is_text = match get_column_affinity(&to_compress_column.coltype) {
+        SqliteAffinity::Blob => false,
+        SqliteAffinity::Text => true,
+        other => anyhow::bail!("the to-compress column has type {} which has affinity {:?}, but affinity must be text or blob. See https://www.sqlite.org/draft/datatype3.html#determination_of_column_affinity", to_compress_column.coltype, other)
+    };
     let dict_id_column_name = format!("_{}_dict", to_compress_column.name);
     log::debug!("cols={:?}", columns_info);
 
@@ -212,57 +246,18 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         )?;
     }
 
-    /*let dict_size = 1_000_000; // 100kB is the default
-    let group_by = "null";
-    let compression_level = 19; // 0 = default = 3
-    let dict_rowid = {
-        // we use sample_count = select dict_size * 100 / avg(length(data))
-        // because the zstd docs recommend using around 100x the target dictionary size of data to train the dictionary
-        let train_query = format_sqlite!("
-            insert into _zstd_dicts (meta,dict) values (:meta,
-                (select zstd_train_dict({0}, :dict_size, (select :dict_size * 100 / avg(length({0})) as sample_count from {1}))
-                    as dict from {1})
-            );", &new_column_name, &new_table_name);
-        log::debug!("[run] {}", &train_query);
-        db.execute(
-            &train_query,
-            named_params! {
-                ":meta": serde_json::to_string(&json!({
-                    "tbl": table_name,
-                    "col": new_column_name,
-                    "group_by": group_by,
-                    "dict_size": dict_size,
-                    "created": chrono::Utc::now().to_rfc3339()
-                })).map_err(|e| UFE(Box::new(e)))?,
-                ":dict_size": dict_size
-            },
-        )?;
-        db.last_insert_rowid()
-    };
     {
-        let compress_query = format_sqlite!(
-            "update {} set {1} = zstd_compress({1}, ?, ?)",
-            &new_table_name,
-            &column_name
-        );
-        log::debug!("[run] {}", compress_query);
-        let updated = db.execute(&compress_query, params![compression_level, dict_rowid])?;
-        log::debug!(
-            "compressed {} rows of {}.{}",
-            updated, table_name, column_name
-        );
-    }*/
-
-    {
+        // create view
         let select_columns_escaped = columns_info
             .iter()
             .map(|c| {
                 if column_name == &c.name {
-                    format_sqlite!(
+                    format!(
                         // prepared statement parameters not allowed in view
-                        "zstd_decompress_col({}, {}) as {0}",
-                        &column_name,
-                        &dict_id_column_name
+                        "zstd_decompress_col({}, {}, {}, 1) as {0}",
+                        &escape_sqlite_identifier(&column_name),
+                        if affinity_is_text { 1 } else { 0 },
+                        &escape_sqlite_identifier(&dict_id_column_name),
                     )
                 } else {
                     format_sqlite!("{}", &c.name)
@@ -382,7 +377,6 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         }
     }
     db.commit()?;
-    log::debug!("consider running pragma vacuum to clean up old data");
     Ok(ToSqlOutput::Owned(Value::Text("Done!".to_string())))
 }
 
@@ -397,7 +391,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
     let time_limit: f64 = ctx
         .get(arg_time_limit_seconds)
         .context("could not get time limit argument")?;
-    if time_limit > 1e100 || time_limit < 0.0 {
+    if !(0.0..=1e100).contains(&time_limit) {
         anyhow::bail!("time too large");
     }
     let end_limit = Instant::now() + Duration::from_secs_f64(time_limit);
@@ -554,10 +548,8 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::{assert_eq, assert_ne};
+    use pretty_assertions::assert_eq;
     use rusqlite::{Connection, Row};
-    use serde::{Deserialize, Serialize};
-    use std::collections::BTreeMap;
 
     fn RowToThong(r: &Row) -> Vec<Value> {
         (0..r.column_count()).map(|i| r.get_raw(i).into()).collect()
@@ -591,6 +583,11 @@ mod tests {
 
     #[test]
     fn enable_transparent() -> anyhow::Result<()> {
+        if std::env::var("RUST_LOG").is_err() {
+            std::env::set_var("RUST_LOG", "info");
+        }
+        env_logger::init();
+
         let db1 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
         let db2 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
 
