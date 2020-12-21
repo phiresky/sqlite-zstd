@@ -1,14 +1,11 @@
-
 use crate::util::*;
-use crate::{zstd_fns::ensure_dicts_table_exists};
+use crate::zstd_fns::ensure_dicts_table_exists;
 use anyhow::Context as AContext;
 use rand::Rng;
-use rusqlite::functions::{Context};
+use rusqlite::functions::Context;
 
-
+use rusqlite::params;
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params};
-
 
 pub struct ZstdTrainDictAggregate {
     /// if None, return trained dict, otherwise insert into _zstd_dicts table with chooser_key given as fourth arg and return id
@@ -77,9 +74,10 @@ impl rusqlite::functions::Aggregate<ZstdTrainDictState, Value> for ZstdTrainDict
         let state =
             state.ok_or_else(|| ah(anyhow::anyhow!("tried to train zstd dict on zero rows")))?;
         log::debug!(
-            "training dict of size {}kB with {} samples (of {} seen)",
+            "training dict of size {}kB with {} samples of total size {}kB (of {} samples seen)",
             state.wanted_dict_size / 1000,
             state.reservoir.len(),
+            state.reservoir.iter().map(|x| x.len()).sum::<usize>() / 1000,
             state.total_count
         );
         let dict = zstd::dict::from_samples(&state.reservoir, state.wanted_dict_size)

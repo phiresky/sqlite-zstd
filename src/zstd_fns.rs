@@ -38,15 +38,6 @@ fn zstd_compress_fn<'a>(
     let arg_dict = 2;
     let arg_is_compact = 3;
 
-    if null_dict_is_passthrough && ctx.len() >= arg_dict {
-        // if the dict id is null, pass through data
-        if let ValueRef::Null = ctx.get_raw(arg_dict) {
-            // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context to avoid copying??
-            // return Ok(ToSqlOutput::Borrowed(ctx.get_raw(arg_data)));
-            return Ok(ToSqlOutput::Owned(ctx.get_raw(arg_data).into()));
-        }
-    }
-
     let input_value = match ctx.get_raw(arg_data) {
         ValueRef::Blob(b) => b,
         ValueRef::Text(b) => b,
@@ -58,6 +49,16 @@ fn zstd_compress_fn<'a>(
             )
         }
     };
+
+    if null_dict_is_passthrough && ctx.len() >= arg_dict {
+        // if the dict id is null, pass through data
+        if let ValueRef::Null = ctx.get_raw(arg_dict) {
+            // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context to avoid copying??
+            // return Ok(ToSqlOutput::Borrowed(ctx.get_raw(arg_data)));
+            return Ok(ToSqlOutput::Owned(Value::Blob(input_value.to_vec())));
+        }
+    }
+
     let level: i32 = if ctx.len() <= arg_level {
         // no level given, use default (currently 3)
         0
@@ -151,7 +152,7 @@ fn zstd_decompress_fn<'a>(
             ValueRef::Integer(-1) => None,
             ValueRef::Null => None,
             ValueRef::Blob(d) => Some(Arc::new(wrap_decoder_dict(d.to_vec()))),
-            ValueRef::Integer(i) => {
+            ValueRef::Integer(_) => {
                 Some(decoder_dict_from_ctx(&ctx, arg_dict).context("load dict")?)
             }
             other => anyhow::bail!(
@@ -222,6 +223,7 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     db.create_scalar_function("zstd_compress", 2, deterministic, zstd_compress)?;
     db.create_scalar_function("zstd_compress", 3, deterministic, zstd_compress)?;
     db.create_scalar_function("zstd_compress", 4, deterministic, zstd_compress)?;
+    db.create_scalar_function("zstd_compress_col", 4, deterministic, zstd_compress_col)?;
     db.create_scalar_function("zstd_decompress", 2, deterministic, zstd_decompress)?;
     db.create_scalar_function("zstd_decompress", 3, deterministic, zstd_decompress)?;
     db.create_scalar_function("zstd_decompress", 4, deterministic, zstd_decompress)?;
@@ -351,7 +353,7 @@ pub mod tests {
         let data = (0..eles).map(|_| match event_type_dist.sample(&mut rng) {
             0 => {
                 let mut properties = BTreeMap::new();
-                for _i in 1..rand::distributions::Uniform::from(5..20).sample(&mut rng) {
+                for _i in 1..rand::distributions::Uniform::from(100..1000).sample(&mut rng) {
                     let p = window_properties[window_properties_dist.sample(&mut rng)].1;
                     properties.insert(p.to_string(), "1".to_string());
                 }

@@ -23,7 +23,13 @@ TODO: describe
 
     `config` is a json object describing the configuration. See [TransparentCompressConfig](src/transparent.rs#L34) for detail.
 
--   `zstd_transparent_maintenance(duration_seconds: float)`
+    The following differences apply when compression is active:
+
+    -   The compressed column may only contain `blob` or `text` data, depending on the affinity of the declared data type (e.g. `VARCHAR(10)` is fine, but `int` is not).
+    -   The primary key must not be null for any row, otherwise updating may not work as expected
+    -   sqlite3_changes() will return 0 for modifying queries ([see here](https://sqlite.org/c3ref/changes.html)).
+
+-   `zstd_incremental_maintenance(duration_seconds: float)`
 
     Perform an incremental maintenance operation taking around the given amount of time.
     This will train dictionaries and compress data based on the grouping given in the TransparentCompressConfig.
