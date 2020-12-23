@@ -11,14 +11,17 @@ default = []
 
 build_extension = ["rusqlite/loadable_extension"]
 
-debug_zstd = ["zstd/debug"]
+# debug_zstd = ["zstd/debug"]
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 #zstd = {version = "0.6.0", git="https://github.com/gyscos/zstd-rs", branch="master" }
-zstd = {version = "0.6.0", path="../zstd-rs"}
+#zstd = {version = "0.5.3", path="../zstd-rs"}
+#zstd = {version = "=0.5.4"}
+zstd = { path = "../zstd-rs", features=["bindgen"] }
+zstd-safe = { path = "../zstd-rs/zstd-safe", features=["bindgen"] }
 anyhow = "1.0.35"
 rand = "0.7.3"
 serde_json = "1.0.60"

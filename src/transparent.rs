@@ -408,7 +408,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
 
 #[derive(Debug)]
 struct TodoInfo {
-    dict_choice: String,
+    dict_choice: Option<String>,
     count: i64,
     total_bytes: i64,
 }
@@ -446,20 +446,32 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
         ))?.query_map(params![], |row| Ok(
             TodoInfo {dict_choice: row.get("dict_choice")?, count: row.get("count")?, total_bytes: row.get("total_bytes")?
         }))?.collect::<Result<Vec<_>, _>>()?;
-        for todo in todos {
+        log::debug!(
+            "total bytes to potentially compress: {}",
+            pretty_bytes(todos.iter().map(|e| e.total_bytes).sum())
+        );
+        for (idx, todo) in todos.into_iter().enumerate() {
             let avg_sample_bytes = todo.total_bytes / todo.count;
             log::debug!(
                 "looking at group={}, has {} rows with {} average size ({} total)",
-                todo.dict_choice,
+                todo.dict_choice.as_deref().unwrap_or("[none]"),
                 todo.count,
                 pretty_bytes(avg_sample_bytes),
                 pretty_bytes(todo.total_bytes)
             );
 
+            let dict_choice = match todo.dict_choice {
+                None => {
+                    log::debug!("Skipping group, no dict chosen");
+                    continue;
+                }
+                Some(e) => e,
+            };
+
             let dict_id: Option<i32> = db
                 .query_row(
                     "select id from _zstd_dicts where chooser_key = ?",
-                    params![todo.dict_choice],
+                    params![dict_choice],
                     |row| row.get("id"),
                 )
                 .optional()?;
@@ -468,7 +480,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                     log::debug!(
                         "Found existing dictionary id={} for key={}",
                         id,
-                        todo.dict_choice
+                        dict_choice
                     );
                     id
                 }
@@ -479,7 +491,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                     if dict_target_size < config.min_dict_size_bytes_for_training {
                         log::debug!(
                             "Dictionary for group '{}' would be smaller than minimum ({} * {:.3} = {} < {}), ignoring",
-                            todo.dict_choice,
+                            dict_choice,
                             pretty_bytes(todo.total_bytes),
                             config.dict_size_ratio,
                             pretty_bytes(dict_target_size),
@@ -492,7 +504,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
 
                     log::debug!(
                         "Training dict for key {} of size {}",
-                        todo.dict_choice,
+                        dict_choice,
                         pretty_bytes(dict_target_size)
                     );
                     db.query_row(&format!(
@@ -501,13 +513,13 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                         tbl=compressed_tablename,
                         dictcol=dict_colname,
                         chooser=config.dict_chooser
-                    ), params![dict_target_size, target_samples, todo.dict_choice, todo.dict_choice], |row| row.get("dictid"))?
+                    ), params![dict_target_size, target_samples, dict_choice, dict_choice], |row| row.get("dictid"))?
                 }
             };
             log::debug!(
                 "Compressing {} samples with key {} and level {}",
                 todo.count,
-                todo.dict_choice,
+                dict_choice,
                 config.compression_level
             );
             let mut total_updated = 0;
@@ -527,7 +539,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                     named_params!{
                         ":lvl": config.compression_level, 
                         ":dict": dict_id,
-                        ":dictchoice": todo.dict_choice,
+                        ":dictchoice": &dict_choice,
                         ":chunksize": chunk_size
                     },
                 ).context("compressing chunk")?;
@@ -555,15 +567,19 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
             log::debug!(
                 "total size of entries with dictid={} afterwards: {}, average={} (before={})",
                 dict_id,
-                pretty_bytes(total_size_after / 1000,),
+                pretty_bytes(total_size_after),
                 pretty_bytes(total_size_after / total_count_after,),
                 pretty_bytes(avg_sample_bytes),
             );
             if Instant::now() > end_limit {
-                log::debug!(
-                    "time limit of {:.1}s reached, stopping with more maintenance work pending",
+                /* log::debug!(
+                    "time limit of {:.1}s reached, stopping with potentially {} bytes of maintenance work pending",
+                    log::debug!(
+                        "total bytes to potentially compress: {}",
+                        pretty_bytes(todos.iter().map(|e| e.total_bytes).sum())
+                    );
                     time_limit
-                );
+                );*/
                 return Ok(1.into());
             }
         }

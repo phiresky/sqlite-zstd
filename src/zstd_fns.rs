@@ -100,9 +100,9 @@ fn zstd_compress_fn<'a>(
             encoder
                 .include_checksum(false)
                 .context("disable checksums")?;
-            encoder.include_contentsize(false).context("cs")?;
-            encoder.include_dictid(false).context("did")?;
-            encoder.include_magicbytes(false).context("did")?;
+            //encoder.include_contentsize(false).context("cs")?;
+            //encoder.include_dictid(false).context("did")?;
+            //encoder.include_magicbytes(false).context("did")?;
         }
         encoder
             .write_all(input_value)
@@ -186,7 +186,7 @@ fn zstd_decompress_inner<'a>(
         }
         .context("dict load doesn't work")?;
         if compact {
-            decoder.include_magicbytes(false)?;
+            //decoder.include_magicbytes(false)?;
         }
         decoder.write_all(input_value).context("decoding")?;
         decoder.flush().context("decoder flushing")?;
