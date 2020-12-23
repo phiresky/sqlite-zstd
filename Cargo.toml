@@ -3,13 +3,15 @@ name = "sqlite-zstd"
 version = "0.1.0"
 authors = ["phiresky <phireskyde+git@gmail.com>"]
 edition = "2018"
-
+description = "Extension for sqlite that provides transparent dictionary-based row-level compression for sqlite"
+repository = "github.com/phiresky/sqlite-zstd"
+license = "LGPL-2.0-or-later"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
 default = []
 
-build_extension = ["rusqlite/loadable_extension"]
+build_extension = ["rusqlite-le/loadable_extension"]
 
 # debug_zstd = ["zstd/debug"]
 
@@ -17,13 +19,11 @@ build_extension = ["rusqlite/loadable_extension"]
 crate-type = ["cdylib"]
 
 [dependencies]
-#zstd = {version = "0.6.0", git="https://github.com/gyscos/zstd-rs", branch="master" }
+zstd = {version = "0.6.0", git="https://github.com/phiresky/zstd-rs", branch="master", features=["bindgen"] }
 #zstd = {version = "0.5.3", path="../zstd-rs"}
 #zstd = {version = "=0.5.4"}
-zstd = { path = "../zstd-rs", features=["bindgen"] }
-zstd-safe = { path = "../zstd-rs/zstd-safe", features=["bindgen"] }
-anyhow = "1.0.35"
-rand = "0.7.3"
+anyhow = "1.0.36"
+rand = "0.8.0"
 serde_json = "1.0.60"
 serde = { version = "1.0.118", features = ["derive"] }
 
@@ -35,20 +35,17 @@ lazy_static = "1.4.0"
 lru_time_cache = "0.11.3"
 
 [dependencies.rusqlite]
-path = "../rusqlite"
+git = "https://github.com/phiresky/rusqlite"
+package = "rusqlite-le"
+branch = "loadable-extensions"
 version = "0.24.2"
 features = ["functions", "blob", "bundled", "array"]
 
 [dev-dependencies]
 chrono = "0.4.19"
 names = "0.11.0"
-pretty_assertions = "*"
+pretty_assertions = "0.6.1"
 
-[dev-dependencies.rusqlite]
-path = "../rusqlite"
-# git = "https://github.com/gwenn/rusqlite"
-# branch = "pr/loadable-extensions"
-features = ["functions", "blob", "bundled", "array"]
 
 [profile.release]
 lto = true

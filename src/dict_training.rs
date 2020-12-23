@@ -58,7 +58,7 @@ impl rusqlite::functions::Aggregate<ZstdTrainDictState, Value> for ZstdTrainDict
             return Ok(());
         }
         state.total_count += 1;
-        let j = rand::thread_rng().gen_range(0, i);
+        let j = rand::thread_rng().gen_range(0..i);
         if j < k {
             state.reservoir[j] = Vec::from(cur);
         }
