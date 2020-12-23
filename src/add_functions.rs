@@ -61,7 +61,7 @@ pub mod tests {
     pub use pretty_assertions::{assert_eq, assert_ne};
 
     use rand::thread_rng;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
@@ -93,8 +93,7 @@ pub mod tests {
                 .take(10)
                 .collect();
         };
-        let mut db = Connection::open(format!("/tmp/eee{}", thread_rng().gen::<i32>()))
-            .context("opening memory db")?;
+        let mut db = Connection::open_in_memory().context("opening memory db")?;
         add_functions(&db).context("adding functions")?;
         db.execute_batch(
             "

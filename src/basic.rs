@@ -1,9 +1,7 @@
-
-
-use crate::{dict_management::*};
+use crate::dict_management::*;
 use anyhow::Context as AContext;
 
-use rusqlite::functions::{Context};
+use rusqlite::functions::Context;
 
 use rusqlite::types::ToSqlOutput;
 use rusqlite::types::{Value, ValueRef};

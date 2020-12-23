@@ -9,6 +9,7 @@ use rusqlite::OptionalExtension;
 use rusqlite::{named_params, params};
 use std::time::{Duration, Instant};
 
+static COMPACT: bool = true;
 #[derive(Debug)]
 struct ColumnInfo {
     name: String,
@@ -285,10 +286,11 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
                 if column_name == &c.name {
                     format!(
                         // prepared statement parameters not allowed in view
-                        "zstd_decompress_col({}, {}, {}, 1) as {0}",
+                        "zstd_decompress_col({}, {}, {}, {}) as {0}",
                         &escape_sqlite_identifier(&column_name),
                         if affinity_is_text { 1 } else { 0 },
                         &escape_sqlite_identifier(&dict_id_column_name),
+                        COMPACT
                     )
                 } else {
                     format_sqlite!("{}", &c.name)
@@ -319,12 +321,13 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
                 if column_name == &c.name {
                     format!(
                         // prepared statement parameters not allowed in view
-                        "zstd_compress_col(new.{col}, {lvl}, (select id from _zstd_dicts where chooser_key=({chooser})), true) as {col},
+                        "zstd_compress_col(new.{col}, {lvl}, (select id from _zstd_dicts where chooser_key=({chooser})), {compact}) as {col},
                         (select id from _zstd_dicts where chooser_key=({chooser})) as {dictcol}",
                         col=escape_sqlite_identifier(&column_name),
                         lvl=config.compression_level,
                         chooser=config.dict_chooser,
-                        dictcol=escape_sqlite_identifier(&dict_id_column_name)
+                        dictcol=escape_sqlite_identifier(&dict_id_column_name),
+                        compact=COMPACT
                     )
                 } else {
                     format_sqlite!("new.{}", &c.name)
@@ -380,10 +383,11 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         for col in &columns_info {
             let update = if col.name == to_compress_column.name {
                 format!(
-                    "{col} = zstd_compress_col(new.{col}, {lvl}, {dictcol}, true)",
+                    "{col} = zstd_compress_col(new.{col}, {lvl}, {dictcol}, {compact})",
                     col = escape_sqlite_identifier(&col.name),
                     lvl = config.compression_level,
-                    dictcol = escape_sqlite_identifier(&dict_id_column_name)
+                    dictcol = escape_sqlite_identifier(&dict_id_column_name),
+                    compact = COMPACT
                 )
             } else {
                 format_sqlite!("{} = new.{}", &col.name, &col.name)
@@ -555,7 +559,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                 let update_start = Instant::now();
                 let updated = db.execute(
                 &format!(
-                        "update {tbl} set {datacol} = zstd_compress_col({datacol}, :lvl, :dict, true), {dictcol} = :dict where rowid in (select rowid from {tbl} where {dictcol} is null and :dictchoice = ({chooser}) limit :chunksize)",
+                        "update {tbl} set {datacol} = zstd_compress_col({datacol}, :lvl, :dict, :compact), {dictcol} = :dict where rowid in (select rowid from {tbl} where {dictcol} is null and :dictchoice = ({chooser}) limit :chunksize)",
                         tbl = compressed_tablename,
                         datacol = data_colname,
                         dictcol = dict_colname,
@@ -565,7 +569,8 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                         ":lvl": config.compression_level, 
                         ":dict": dict_id,
                         ":dictchoice": &dict_choice,
-                        ":chunksize": chunk_size
+                        ":chunksize": chunk_size,
+                        ":compact": COMPACT
                     },
                 ).context("compressing chunk")?;
 
@@ -631,24 +636,27 @@ mod tests {
     use super::add_functions::tests::create_example_db;
     use super::*;
     use pretty_assertions::assert_eq;
+    use rand::prelude::SliceRandom;
     use rusqlite::params;
     use rusqlite::{Connection, Row};
 
-    fn row_to_thong(r: &Row) -> Vec<Value> {
-        (0..r.column_count()).map(|i| r.get_raw(i).into()).collect()
+    fn row_to_thong(r: &Row) -> anyhow::Result<Vec<Value>> {
+        Ok((0..r.column_count())
+            .map(|i| r.get_ref(i).map(|e| e.into()))
+            .collect::<Result<_, _>>()?)
     }
 
     fn get_whole_table(db: &Connection, tbl_name: &str) -> anyhow::Result<Vec<Vec<Value>>> {
         let mut stmt = db.prepare(&format!("select * from {}", tbl_name))?;
         let q1: Vec<Vec<Value>> = stmt
-            .query_map(params![], |e| Ok(row_to_thong(e)))?
+            .query_map(params![], |e| row_to_thong(e).map_err(ah))?
             .collect::<Result<_, rusqlite::Error>>()?;
         Ok(q1)
     }
 
     fn check_table_rows_same(db1: &Connection, db2: &Connection) -> anyhow::Result<()> {
-        let tbl1 = get_whole_table(db1, "events")?;
-        let tbl2 = get_whole_table(db2, "events")?;
+        let tbl1 = get_whole_table(db1, "events").context("Could not get whole table db 1")?;
+        let tbl2 = get_whole_table(db2, "events").context("Could not get whole table db 2")?;
         assert_eq!(tbl1, tbl2);
 
         Ok(())
@@ -726,10 +734,11 @@ mod tests {
 
     fn update_other_two_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
+        delete_one(db, id2, id)?;
         let updc = db
             .execute(
-                "update events set timestamp = '2020-02-01', id=123456 where id = ?",
-                params![id],
+                "update events set timestamp = '2020-02-01', id=? where id = ?",
+                params![id2, id],
             )
             .context("updating other two column")?;
         //assert_eq!(updc, 1);
@@ -738,14 +747,16 @@ mod tests {
 
     fn update_comp_col_and_other_two_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
-        let updc = db.execute("update events set timestamp = '2020-02-01', id=123456, data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id]).context("updating three column")?;
+        delete_one(db, id2, id)?;
+        let updc = db.execute("update events set timestamp = '2020-02-01', id=?, data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id2,id]).context("updating three column")?;
         //assert_eq!(updc, 1);
         Ok(())
     }
 
     fn update_two_rows(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
-        let updc = db.execute("update events set timestamp = '2020-02-01', id=(id + 99999), data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id in (?, ?)", params![id, id2]).context("updating two rows")?;
+        let updc = db.execute("update events set timestamp = '2020-02-01', data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id in (:a, :b)", 
+        named_params! {":a": id, ":b": id2}).context("updating two rows")?;
         //assert_eq!(updc, 2);
         Ok(())
     }
@@ -792,19 +803,24 @@ mod tests {
 
     #[test]
     fn test_many() -> anyhow::Result<()> {
-        let posses: Vec<Vec<&dyn Fn(&Connection, i64, i64) -> anyhow::Result<()>>> = vec![
-            vec![&insert],
-            vec![&update_comp_col],
-            vec![&update_other_col],
-            vec![&update_other_two_col],
-            vec![&update_comp_col_and_other_two_col],
-            vec![&update_two_rows],
-            vec![&update_two_rows_by_compressed],
-            vec![&delete_one],
-            vec![&delete_where_other],
+        let posses: Vec<&dyn Fn(&Connection, i64, i64) -> anyhow::Result<()>> = vec![
+            &insert,
+            &update_comp_col,
+            &update_other_col,
+            &update_other_two_col,
+            &update_comp_col_and_other_two_col,
+            &update_two_rows,
+            &update_two_rows_by_compressed,
+            &delete_one,
+            &delete_where_other,
         ];
+
+        let mut posses2 = vec![];
+        for i in 0..100 {
+            posses2.push(*posses.choose(&mut rand::thread_rng()).unwrap());
+        }
         for compress_first in vec![false, true] {
-            for operations in &posses {
+            for operations in &[&posses2] {
                 if compress_first {
                     let (db1, db2) = get_two_dbs().context("Could not create databases")?;
                     if compress_first {
@@ -824,7 +840,7 @@ mod tests {
                         assert_eq!(uncompressed_count, 0);
                     }
 
-                    for operation in operations {
+                    for operation in *operations {
                         let id = get_rand_id(&db1)?;
                         let id2 = get_rand_id(&db2)?;
                         operation(&db1, id, id2)

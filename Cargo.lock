@@ -301,9 +301,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsqlite3-sys"
+name = "libsqlite3-sys-le"
 version = "0.21.0"
-source = "git+https://github.com/phiresky/rusqlite?branch=loadable-extensions#efd88cbe33ba0556d1ea3d12b899d7e4c7841423"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa8276a58961fbb735f9220f481799dd6395d18463e25848c01a03276270e381"
 dependencies = [
  "cc",
  "pkg-config",
@@ -543,16 +544,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b181ba2dcf07aaccad5448e8ead58db5b742cf85dfe035e2227f137a539a189"
 
 [[package]]
-name = "rusqlite"
+name = "rusqlite-le"
 version = "0.24.2"
-source = "git+https://github.com/phiresky/rusqlite?branch=loadable-extensions#efd88cbe33ba0556d1ea3d12b899d7e4c7841423"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64929d3ef05df6deaee8e126d30d7de3b3e2e65c762b0ab42508ad68d745f66c"
 dependencies = [
  "bitflags",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",
  "lazy_static",
- "libsqlite3-sys",
+ "libsqlite3-sys-le",
  "memchr",
  "smallvec",
 ]
@@ -626,7 +628,7 @@ dependencies = [
  "owning_ref",
  "pretty_assertions",
  "rand 0.8.0",
- "rusqlite",
+ "rusqlite-le",
  "serde",
  "serde_json",
  "zstd",
