@@ -31,7 +31,7 @@ pub fn wrap_decoder_dict(dict_raw: Vec<u8>) -> OwnedDecoderDict<'static> {
 }
 // TODO: the rust interface currently requires a level when preparing a dictionary, but the zstd interface (ZSTD_CCtx_loadDictionary) does not.
 // TODO: Using LruCache here isn't very smart
-pub fn encoder_dict_from_ctx<'a, 'b>(
+pub fn encoder_dict_from_ctx<'a>(
     ctx: &'a Context,
     arg_index: usize,
     level: i32,
@@ -66,7 +66,7 @@ pub fn encoder_dict_from_ctx<'a, 'b>(
     Ok(res)
 }
 
-pub fn decoder_dict_from_ctx<'a, 'b>(
+pub fn decoder_dict_from_ctx<'a>(
     ctx: &'a Context,
     arg_index: usize,
 ) -> anyhow::Result<Arc<OwnedDecoderDict<'static>>> {

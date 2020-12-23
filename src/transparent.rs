@@ -1,4 +1,4 @@
-use crate::{add_functions::*, util::*, *};
+use crate::{util::*, *};
 use anyhow::Context as AContext;
 
 use rusqlite::functions::Context;
@@ -108,7 +108,7 @@ fn get_column_affinity(declared_type: &str) -> SqliteAffinity {
         Integer
     } else if typ.contains("char") || typ.contains("clob") || typ.contains("text") {
         Text
-    } else if typ.contains("blob") || typ == "" {
+    } else if typ.contains("blob") || typ.is_empty() {
         Blob
     } else if typ.contains("real") || typ.contains("floa") || typ.contains("doub") {
         Real
@@ -473,7 +473,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
             config.column,
             pretty_bytes(todos.iter().map(|e| e.total_bytes).sum())
         );
-        for (idx, todo) in todos.into_iter().enumerate() {
+        for (_idx, todo) in todos.into_iter().enumerate() {
             let avg_sample_bytes = todo.total_bytes / todo.count;
             log::debug!(
                 "looking at group={}, has {} rows with {} average size ({} total)",

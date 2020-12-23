@@ -1,21 +1,9 @@
+use crate::dict_training::ZstdTrainDictAggregate;
 use crate::util::*;
 use crate::{basic::zstd_decompress_fn, transparent::*};
-use crate::{dict_management::*, dict_training::ZstdTrainDictAggregate};
-use anyhow::Context as AContext;
 
 use crate::basic::zstd_compress_fn;
 use rusqlite::functions::{Context, FunctionFlags};
-use rusqlite::types::ToSql;
-use rusqlite::types::ToSqlOutput;
-use rusqlite::types::{Value, ValueRef};
-use rusqlite::{params, Connection};
-use std::{
-    borrow::Borrow,
-    io::Write,
-    ops::DerefMut,
-    sync::{Arc, Mutex},
-};
-use zstd::dict::DecoderDictionary;
 
 pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     let nondeterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY;
@@ -68,6 +56,7 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use anyhow::Context;
     use chrono::TimeZone;
     pub use pretty_assertions::{assert_eq, assert_ne};
 

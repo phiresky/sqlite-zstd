@@ -1,5 +1,5 @@
-use std::io::{Cursor, Read};
-use std::{fs::File, io::Write};
+
+use std::{io::Write};
 
 fn decode_dict(enc: &[u8], dict: &[u8]) -> Vec<u8> {
     let mut dec = Vec::new();
