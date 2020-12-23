@@ -23,24 +23,19 @@ pub extern "C" fn sqlite3_sqlitezstd_init(
      */
     match init(db) {
         Ok(()) => {
-            log::debug!("[sqlite-zstd] initialized");
+            log::info!("[sqlite-zstd] initialized");
             ffi::SQLITE_OK
         }
         Err(e) => {
-            log::debug!("[sqlite-zstd] init error: {:?}", e);
+            log::error!("[sqlite-zstd] init error: {:?}", e);
             ffi::SQLITE_ERROR
         }
     }
 }
 
 fn init(db_handle: *mut ffi::sqlite3) -> anyhow::Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
     let db = unsafe { rusqlite::Connection::from_handle(db_handle)? };
 
-    crate::zstd_fns::add_functions(&db)?;
+    crate::load(&db)?;
     Ok(())
 }

@@ -1,4 +1,4 @@
-use crate::{util::*, zstd_fns::*, *};
+use crate::{add_functions::*, util::*, *};
 use anyhow::Context as AContext;
 
 use rusqlite::functions::Context;
@@ -31,11 +31,12 @@ fn def_incremental_compression_step_bytes() -> i64 {
     5_000_000
 }
 fn def_target_db_load() -> f32 {
-    0.3
+    0.5
 }
 
 /// This is the configuration of the transparent compression for one column of one table.
-/// It is safe to change every property of this configuration at any time (except for table and column), but data that is already compressed will not be recompressed with the new settings.
+/// It is safe to change every property of this configuration at any time except for table and column, but data that is already compressed will not be recompressed with the new settings.
+/// You can update the config e.g. using SQL: `update _zstd_configs set config = json_patch(config, '{"target_db_load": 1}');`
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransparentCompressConfig {
     /// the name of the table to which the transparent compression will be applied. It will be renamed to _tblname_zstd and replaced with a editable view.
@@ -115,6 +116,29 @@ fn get_column_affinity(declared_type: &str) -> SqliteAffinity {
         Numeric
     }
 }
+
+fn show_warnings(db: &Connection) -> anyhow::Result<()> {
+    // warnings
+    let journal_mode: String = db
+        .query_row("pragma journal_mode;", params![], |r| r.get(0))
+        .context("querying journal mode")?;
+    if journal_mode != "wal" {
+        log::warn!("Warning: It is recommended to set `pragma journal_mode=WAL;`");
+    }
+    let vacuum_mode: i32 = db
+        .query_row("pragma auto_vacuum;", params![], |r| r.get(0))
+        .context("querying vacuum mode")?;
+    if vacuum_mode != 1 {
+        log::warn!("Warning: It is recommended to set `pragma auto_vacuum=full;`");
+    }
+    let busy_timeout: i32 = db
+        .query_row("pragma busy_timeout;", params![], |r| r.get(0))
+        .context("querying busy timeout")?;
+    if busy_timeout == 0 {
+        log::warn!("Warning: It is recommended to set `pragma busy_timeout=2000;` or higher");
+    }
+    Ok(())
+}
 ///
 /// enables transparent row-level compression for a table with the following steps:
 ///
@@ -158,21 +182,8 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         })
         .context("Could not query table_info")?
         .collect::<Result<_, rusqlite::Error>>()?;
-    {
-        // warnings
-        let journal_mode: String = db
-            .query_row("pragma journal_mode;", params![], |r| r.get(0))
-            .context("querying journal mode")?;
-        if journal_mode != "wal" {
-            log::warn!("Warning: It is recommended to set `pragma journal_mode=WAL;`");
-        }
-        let vacuum_mode: i32 = db
-            .query_row("pragma auto_vacuum;", params![], |r| r.get(0))
-            .context("querying vacuum mode")?;
-        if vacuum_mode != 1 && vacuum_mode != 2 {
-            log::warn!("Warning: It is recommended to set `pragma auto_vacuum=full;`");
-        }
-    }
+
+    show_warnings(&db)?;
 
     // primary key columns. these will be used to index the table in the modifying triggers
     let primary_key_columns: Vec<&ColumnInfo> =
@@ -226,7 +237,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         db.execute(&rename_query, params![])
             .context("Could not rename table")?;
 
-        ensure_dicts_table_exists(&db)?;
+        util::ensure_dicts_table_exists(&db)?;
 
         db.execute(
             "
@@ -422,6 +433,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
     }
     let end_limit = Instant::now() + Duration::from_secs_f64(time_limit);
     let db = unsafe { ctx.get_connection()? };
+    show_warnings(&db)?;
     let configs = db
         .prepare("select config from _zstd_configs")?
         .query_map(params![], |row| {
@@ -431,23 +443,34 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
         })?
         .collect::<Result<Vec<TransparentCompressConfig>, _>>()?;
     for config in configs {
-        log::debug!("looking at {}.{}", config.table, config.column);
-
         let compressed_tablename = escape_sqlite_identifier(&format!("_{}_zstd", config.table));
         let data_colname = escape_sqlite_identifier(&config.column);
         let dict_colname = escape_sqlite_identifier(&format!("_{}_dict", config.column));
 
-        let todos = db.prepare(&format!(
-            "select ({chooser}) as dict_choice, count(*) as count, sum(length({datacol})) as total_bytes from {tbl} where {dictcol} is null group by dict_choice",
-            tbl = compressed_tablename,
-            dictcol = dict_colname,
-            datacol = data_colname,
-            chooser = config.dict_chooser
-        ))?.query_map(params![], |row| Ok(
-            TodoInfo {dict_choice: row.get("dict_choice")?, count: row.get("count")?, total_bytes: row.get("total_bytes")?
-        }))?.collect::<Result<Vec<_>, _>>()?;
-        log::debug!(
-            "total bytes to potentially compress: {}",
+        let todos = db
+            .prepare(&format!(
+                "select
+                ({chooser}) as dict_choice,
+                count(*) as count,
+                sum(length({datacol})) as total_bytes
+            from {tbl} where {dictcol} is null group by dict_choice",
+                tbl = compressed_tablename,
+                dictcol = dict_colname,
+                datacol = data_colname,
+                chooser = config.dict_chooser
+            ))?
+            .query_map(params![], |row| {
+                Ok(TodoInfo {
+                    dict_choice: row.get("dict_choice")?,
+                    count: row.get("count")?,
+                    total_bytes: row.get("total_bytes")?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        log::info!(
+            "{}.{}: Total {} to potentially compress.",
+            config.table,
+            config.column,
             pretty_bytes(todos.iter().map(|e| e.total_bytes).sum())
         );
         for (idx, todo) in todos.into_iter().enumerate() {
@@ -475,14 +498,14 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                     |row| row.get("id"),
                 )
                 .optional()?;
-            let dict_id = match dict_id {
+            let (dict_id, dict_is_new) = match dict_id {
                 Some(id) => {
                     log::debug!(
                         "Found existing dictionary id={} for key={}",
                         id,
                         dict_choice
                     );
-                    id
+                    (id, false)
                 }
                 None => {
                     let dict_target_size =
@@ -507,13 +530,14 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                         dict_choice,
                         pretty_bytes(dict_target_size)
                     );
-                    db.query_row(&format!(
+                    let id = db.query_row(&format!(
                         "select zstd_train_dict_and_save({datacol}, ?, ?, ?) as dictid from {tbl} where {dictcol} is null and ? = ({chooser})", 
                         datacol=data_colname,
                         tbl=compressed_tablename,
                         dictcol=dict_colname,
                         chooser=config.dict_chooser
-                    ), params![dict_target_size, target_samples, dict_choice, dict_choice], |row| row.get("dictid"))?
+                    ), params![dict_target_size, target_samples, dict_choice, dict_choice], |row| row.get("dictid"))?;
+                    (id, true)
                 }
             };
             log::debug!(
@@ -528,6 +552,7 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                 chunk_size = 1;
             }
             loop {
+                let update_start = Instant::now();
                 let updated = db.execute(
                 &format!(
                         "update {tbl} set {datacol} = zstd_compress_col({datacol}, :lvl, :dict, true), {dictcol} = :dict where rowid in (select rowid from {tbl} where {dictcol} is null and :dictchoice = ({chooser}) limit :chunksize)",
@@ -544,12 +569,25 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                     },
                 ).context("compressing chunk")?;
 
-                if updated == 0 {
-                    break;
-                }
                 total_updated += updated;
                 log::debug!("Compressed {} / {}", total_updated, todo.count);
                 if Instant::now() > end_limit {
+                    break;
+                }
+                let elapsed = update_start.elapsed();
+                if elapsed.div_f32(config.target_db_load) > elapsed {
+                    let sleep_duration = elapsed.div_f32(config.target_db_load) - elapsed;
+                    if sleep_duration > Duration::from_millis(1) {
+                        log::debug!(
+                            "Sleeping {}s to keep write load at {}",
+                            sleep_duration.as_secs_f32(),
+                            config.target_db_load
+                        );
+                        std::thread::sleep(sleep_duration);
+                    }
+                }
+
+                if updated == 0 {
                     break;
                 }
             }
@@ -564,33 +602,36 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
                 params![dict_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            log::debug!(
-                "total size of entries with dictid={} afterwards: {}, average={} (before={})",
+            if dict_is_new {
+                log::info!(
+                "Compressed {} rows with dict_choice={} (dict_id={}). Total size of entries before: {}, afterwards: {}, (average: before={}, after={})",
+                total_updated,
+                dict_choice,
                 dict_id,
+                pretty_bytes(todo.total_bytes),
                 pretty_bytes(total_size_after),
-                pretty_bytes(total_size_after / total_count_after,),
                 pretty_bytes(avg_sample_bytes),
+                pretty_bytes(total_size_after / total_count_after),
             );
+            }
             if Instant::now() > end_limit {
-                /* log::debug!(
-                    "time limit of {:.1}s reached, stopping with potentially {} bytes of maintenance work pending",
-                    log::debug!(
-                        "total bytes to potentially compress: {}",
-                        pretty_bytes(todos.iter().map(|e| e.total_bytes).sum())
-                    );
+                log::info!(
+                    "time limit of {:.1}s reached, stopping with more maintenance work pending",
                     time_limit
-                );*/
+                );
                 return Ok(1.into());
             }
         }
     }
-    log::debug!("maintenence complete!");
+    log::info!("All maintenance work completed!");
     Ok(0.into())
 }
 #[cfg(test)]
 mod tests {
+    use super::add_functions::tests::create_example_db;
     use super::*;
     use pretty_assertions::assert_eq;
+    use rusqlite::params;
     use rusqlite::{Connection, Row};
 
     fn row_to_thong(r: &Row) -> Vec<Value> {
@@ -615,8 +656,8 @@ mod tests {
 
     #[test]
     fn sanity() -> anyhow::Result<()> {
-        let db1 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
-        let db2 = super::zstd_fns::tests::create_example_db(Some(123), 100)?;
+        let db1 = create_example_db(Some(123), 100)?;
+        let db2 = create_example_db(Some(123), 100)?;
 
         check_table_rows_same(&db1, &db2)?;
 
@@ -629,8 +670,8 @@ mod tests {
         }
         env_logger::try_init().ok();
 
-        let db1 = super::zstd_fns::tests::create_example_db(Some(123), 2000)?;
-        let db2 = super::zstd_fns::tests::create_example_db(Some(123), 2000)?;
+        let db1 = create_example_db(Some(123), 2000)?;
+        let db2 = create_example_db(Some(123), 2000)?;
 
         db2.query_row(
             r#"select zstd_enable_transparent(?)"#,

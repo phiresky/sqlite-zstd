@@ -1,8 +1,9 @@
-use crate::transparent::*;
 use crate::util::*;
+use crate::{basic::zstd_decompress_fn, transparent::*};
 use crate::{dict_management::*, dict_training::ZstdTrainDictAggregate};
 use anyhow::Context as AContext;
 
+use crate::basic::zstd_compress_fn;
 use rusqlite::functions::{Context, FunctionFlags};
 use rusqlite::types::ToSql;
 use rusqlite::types::ToSqlOutput;
@@ -15,199 +16,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use zstd::dict::DecoderDictionary;
-
-pub fn ensure_dicts_table_exists(db: &Connection) -> rusqlite::Result<()> {
-    db.execute(
-        "
-        create table if not exists _zstd_dicts (
-            id integer primary key autoincrement,
-            chooser_key text unique,
-            dict blob not null
-        );",
-        params![],
-    )?;
-    Ok(())
-}
-
-fn zstd_compress_fn<'a>(
-    ctx: &Context,
-    null_dict_is_passthrough: bool,
-) -> anyhow::Result<ToSqlOutput<'a>> {
-    let arg_data = 0;
-    let arg_level = 1;
-    let arg_dict = 2;
-    let arg_is_compact = 3;
-
-    let input_value = match ctx.get_raw(arg_data) {
-        ValueRef::Blob(b) => b,
-        ValueRef::Text(b) => b,
-        ValueRef::Null => return Ok(ToSqlOutput::Owned(Value::Null)), // pass through null
-        e => {
-            anyhow::bail!(
-                "zstd_compress expects blob or text as input, got {}",
-                e.data_type()
-            )
-        }
-    };
-
-    if null_dict_is_passthrough && ctx.len() >= arg_dict {
-        // if the dict id is null, pass through data
-        if let ValueRef::Null = ctx.get_raw(arg_dict) {
-            // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context to avoid copying??
-            // return Ok(ToSqlOutput::Borrowed(ctx.get_raw(arg_data)));
-            return Ok(ToSqlOutput::Owned(Value::Blob(input_value.to_vec())));
-        }
-    }
-
-    let level: i32 = if ctx.len() <= arg_level {
-        // no level given, use default (currently 3)
-        0
-    } else {
-        ctx.get(arg_level).context("level argument")?
-    };
-    let compact: bool = if ctx.len() <= arg_is_compact {
-        false
-    } else {
-        ctx.get(arg_is_compact).context("is_compact argument")?
-    };
-
-    let dict = if ctx.len() <= arg_dict {
-        None
-    } else {
-        match ctx.get_raw(arg_dict) {
-            ValueRef::Integer(-1) => None,
-            ValueRef::Null => None,
-            ValueRef::Blob(d) => Some(Arc::new(wrap_encoder_dict(d.to_vec(), level))),
-            ValueRef::Integer(_) => Some(
-                encoder_dict_from_ctx(&ctx, arg_dict, level)
-                    .context("loading dictionary from int")?,
-            ),
-            other => anyhow::bail!(
-                "dict argument must be int or blob, got {}",
-                other.data_type()
-            ),
-        }
-    };
-
-    let res = {
-        let out = Vec::new();
-        let mut encoder = match &dict {
-            Some(dict) => zstd::stream::write::Encoder::with_prepared_dictionary(out, dict),
-            None => zstd::stream::write::Encoder::new(out, level),
-        }
-        .context("creating zstd encoder")?;
-        if compact {
-            encoder
-                .include_checksum(false)
-                .context("disable checksums")?;
-            //encoder.include_contentsize(false).context("cs")?;
-            //encoder.include_dictid(false).context("did")?;
-            //encoder.include_magicbytes(false).context("did")?;
-        }
-        encoder
-            .write_all(input_value)
-            .context("writing data to zstd encoder")?;
-        encoder.finish().context("finishing zstd stream")?
-    };
-    drop(dict); // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
-    Ok(ToSqlOutput::Owned(Value::Blob(res)))
-}
-
-fn zstd_decompress_fn<'a>(
-    ctx: &Context,
-    null_dict_is_passthrough: bool,
-) -> anyhow::Result<ToSqlOutput<'a>> {
-    let arg_data = 0;
-    let arg_output_text = 1;
-    let arg_dict = 2;
-    let arg_is_compact = 3;
-
-    if null_dict_is_passthrough && ctx.len() >= arg_dict {
-        // if the dict id is null, pass through data
-
-        if let ValueRef::Null = ctx.get_raw(arg_dict) {
-            // TODO: figure out if sqlite3_result_blob can be passed a pointer into sqlite3_context to avoid copying??
-            // return Ok(ToSqlOutput::Borrowed(ctx.get_raw(arg_data)));
-            return Ok(ToSqlOutput::Owned(ctx.get_raw(arg_data).into()));
-        }
-    }
-
-    let output_text: bool = ctx.get(arg_output_text).context("output_text arg")?;
-
-    let input_value = match ctx.get_raw(arg_data) {
-        ValueRef::Blob(b) => b,
-        ValueRef::Null => return Ok(ToSqlOutput::Owned(Value::Null)), // pass through null
-        e => {
-            anyhow::bail!(
-                "zstd_decompress expects blob as input, got {}",
-                e.data_type()
-            )
-        }
-    };
-
-    let dict = if ctx.len() <= arg_dict {
-        None
-    } else {
-        match ctx.get_raw(arg_dict) {
-            ValueRef::Integer(-1) => None,
-            ValueRef::Null => None,
-            ValueRef::Blob(d) => Some(Arc::new(wrap_decoder_dict(d.to_vec()))),
-            ValueRef::Integer(_) => {
-                Some(decoder_dict_from_ctx(&ctx, arg_dict).context("load dict")?)
-            }
-            other => anyhow::bail!(
-                "dict argument must be int or blob, got {}",
-                other.data_type()
-            ),
-        }
-    };
-
-    let compact = if ctx.len() <= arg_is_compact {
-        false
-    } else {
-        ctx.get(arg_is_compact).context("argument 'compact'")?
-    };
-    let dict_ref = dict.as_ref().map(|e| -> &DecoderDictionary { &e });
-
-    zstd_decompress_inner(input_value, dict_ref, output_text, compact)
-}
-
-fn zstd_decompress_inner<'a>(
-    input_value: &[u8],
-    dict: Option<&DecoderDictionary>,
-    output_text: bool,
-    compact: bool,
-) -> anyhow::Result<ToSqlOutput<'a>> {
-    let vec = {
-        let out = Vec::new();
-        let mut decoder = match &dict {
-            Some(dict) => zstd::stream::write::Decoder::with_prepared_dictionary(out, &dict),
-            None => zstd::stream::write::Decoder::new(out),
-        }
-        .context("dict load doesn't work")?;
-        if compact {
-            //decoder.include_magicbytes(false)?;
-        }
-        decoder.write_all(input_value).context("decoding")?;
-        decoder.flush().context("decoder flushing")?;
-        decoder.into_inner()
-    };
-
-    dict; // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
-    if output_text {
-        Ok(ToSqlOutput::Owned(Value::Text(
-            // converted right back to &u8 in https://docs.rs/rusqlite/0.21.0/src/rusqlite/types/value_ref.rs.html#107
-            // so we don't want the overhead of checking utf8. also db encoding might not be utf8 so ??
-            unsafe { String::from_utf8_unchecked(vec) },
-        )))
-    } else {
-        Ok(ToSqlOutput::Owned(Value::Blob(vec)))
-    }
-}
-
-fn ah_ah<R>(f: impl Fn(&Context) -> anyhow::Result<R>) -> impl Fn(&Context) -> rusqlite::Result<R> {
-    move |ctx| f(ctx).map_err(ah)
-}
 
 pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     let nondeterministic = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY;
@@ -228,6 +36,7 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
     db.create_scalar_function("zstd_decompress", 3, deterministic, zstd_decompress)?;
     db.create_scalar_function("zstd_decompress", 4, deterministic, zstd_decompress)?;
     db.create_scalar_function("zstd_decompress_col", 4, deterministic, zstd_decompress_col)?;
+
     db.create_aggregate_function(
         "zstd_train_dict",
         3,
@@ -244,19 +53,14 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
             return_save_id: true,
         },
     )?;
-    db.create_scalar_function(
-        "zstd_enable_transparent",
-        1,
-        nondeterministic,
-        ah_ah(zstd_enable_transparent),
-    )?;
 
-    db.create_scalar_function(
-        "zstd_incremental_maintenance",
-        1,
-        nondeterministic,
-        ah_ah(zstd_incremental_maintenance),
-    )?;
+    db.create_scalar_function("zstd_enable_transparent", 1, nondeterministic, |ctx| {
+        zstd_enable_transparent(ctx).map_err(ah)
+    })?;
+
+    db.create_scalar_function("zstd_incremental_maintenance", 1, nondeterministic, |ctx| {
+        zstd_incremental_maintenance(ctx).map_err(ah)
+    })?;
 
     Ok(())
 }

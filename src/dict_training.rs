@@ -1,5 +1,4 @@
 use crate::util::*;
-use crate::zstd_fns::ensure_dicts_table_exists;
 use anyhow::Context as AContext;
 use rand::Rng;
 use rusqlite::functions::Context;

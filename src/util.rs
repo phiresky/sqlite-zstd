@@ -1,16 +1,18 @@
+use log::LevelFilter;
+use rusqlite::types::ValueRef;
 
-
-
-
-
-
-use rusqlite::types::{ValueRef};
-
-
-
-/*fn context_to_db(ctx: &Context) -> Connection {
-    let handle = rusqlite::ffi::sqlite3_context_db_handle(ctx.ctx);
-}*/
+pub fn ensure_dicts_table_exists(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    db.execute(
+        "
+        create table if not exists _zstd_dicts (
+            id integer primary key autoincrement,
+            chooser_key text unique,
+            dict blob not null
+        );",
+        rusqlite::params![],
+    )?;
+    Ok(())
+}
 
 pub fn debug_row(r: &rusqlite::Row) {
     let cols = r.column_names();
@@ -80,6 +82,13 @@ pub fn escape_sqlite_identifier(identifier: &str) -> String {
 /**
  * this is needed sometimes because _parameters are not allowed in views_, so using prepared statements is not possible :/
  */
-pub fn escape_sqlite_string(string: &str) -> String {
+/*pub fn escape_sqlite_string(string: &str) -> String {
     format!("'{}'", string.replace("'", "''"))
+}*/
+
+pub fn init_logging(default_level: LevelFilter) {
+    if std::env::var("SQLITE_ZSTD_LOG").is_err() {
+        std::env::set_var("SQLITE_ZSTD_LOG", format!("{}", default_level));
+    }
+    env_logger::try_init_from_env(env_logger::Env::new().filter("SQLITE_ZSTD_LOG")).ok();
 }
