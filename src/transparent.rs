@@ -1,6 +1,7 @@
 use crate::{util::*, *};
 use anyhow::Context as AContext;
 
+use env_logger::fmt::Timestamp;
 use rusqlite::functions::Context;
 
 use rusqlite::types::ToSqlOutput;
@@ -447,189 +448,220 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
         })?
         .collect::<Result<Vec<TransparentCompressConfig>, _>>()?;
     for config in configs {
-        let compressed_tablename = escape_sqlite_identifier(&format!("_{}_zstd", config.table));
-        let data_colname = escape_sqlite_identifier(&config.column);
-        let dict_colname = escape_sqlite_identifier(&format!("_{}_dict", config.column));
-
-        let todos = db
-            .prepare(&format!(
-                "select
-                ({chooser}) as dict_choice,
-                count(*) as count,
-                sum(length({datacol})) as total_bytes
-            from {tbl} where {dictcol} is null group by dict_choice",
-                tbl = compressed_tablename,
-                dictcol = dict_colname,
-                datacol = data_colname,
-                chooser = config.dict_chooser
-            ))?
-            .query_map(params![], |row| {
-                Ok(TodoInfo {
-                    dict_choice: row.get("dict_choice")?,
-                    count: row.get("count")?,
-                    total_bytes: row.get("total_bytes")?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        log::info!(
-            "{}.{}: Total {} to potentially compress.",
-            config.table,
-            config.column,
-            pretty_bytes(todos.iter().map(|e| e.total_bytes).sum())
-        );
-        for (_idx, todo) in todos.into_iter().enumerate() {
-            let avg_sample_bytes = todo.total_bytes / todo.count;
-            log::debug!(
-                "looking at group={}, has {} rows with {} average size ({} total)",
-                todo.dict_choice.as_deref().unwrap_or("[none]"),
-                todo.count,
-                pretty_bytes(avg_sample_bytes),
-                pretty_bytes(todo.total_bytes)
-            );
-
-            let dict_choice = match todo.dict_choice {
-                None => {
-                    log::debug!("Skipping group, no dict chosen");
-                    continue;
-                }
-                Some(e) => e,
-            };
-
-            let dict_id: Option<i32> = db
-                .query_row(
-                    "select id from _zstd_dicts where chooser_key = ?",
-                    params![dict_choice],
-                    |row| row.get("id"),
-                )
-                .optional()?;
-            let (dict_id, dict_is_new) = match dict_id {
-                Some(id) => {
-                    log::debug!(
-                        "Found existing dictionary id={} for key={}",
-                        id,
-                        dict_choice
-                    );
-                    (id, false)
-                }
-                None => {
-                    let dict_target_size =
-                        (todo.total_bytes as f32 * config.dict_size_ratio) as i64;
-
-                    if dict_target_size < config.min_dict_size_bytes_for_training {
-                        log::debug!(
-                            "Dictionary for group '{}' would be smaller than minimum ({} * {:.3} = {} < {}), ignoring",
-                            dict_choice,
-                            pretty_bytes(todo.total_bytes),
-                            config.dict_size_ratio,
-                            pretty_bytes(dict_target_size),
-                            pretty_bytes(config.min_dict_size_bytes_for_training)
-                        );
-                        continue;
-                    }
-                    let target_samples = (dict_target_size as f32 * config.train_dict_samples_ratio
-                        / avg_sample_bytes as f32) as i64; // use roughly 100x the size of the dictionary as data
-
-                    log::debug!(
-                        "Training dict for key {} of size {}",
-                        dict_choice,
-                        pretty_bytes(dict_target_size)
-                    );
-                    let id = db.query_row(&format!(
-                        "select zstd_train_dict_and_save({datacol}, ?, ?, ?) as dictid from {tbl} where {dictcol} is null and ? = ({chooser})", 
-                        datacol=data_colname,
-                        tbl=compressed_tablename,
-                        dictcol=dict_colname,
-                        chooser=config.dict_chooser
-                    ), params![dict_target_size, target_samples, dict_choice, dict_choice], |row| row.get("dictid"))?;
-                    (id, true)
-                }
-            };
-            log::debug!(
-                "Compressing {} samples with key {} and level {}",
-                todo.count,
-                dict_choice,
-                config.compression_level
-            );
-            let mut total_updated = 0;
-            let mut chunk_size = config.incremental_compression_step_bytes / avg_sample_bytes;
-            if chunk_size < 1 {
-                chunk_size = 1;
-            }
-            loop {
-                let update_start = Instant::now();
-                let updated = db.execute(
-                &format!(
-                        "update {tbl} set {datacol} = zstd_compress_col({datacol}, :lvl, :dict, :compact), {dictcol} = :dict where rowid in (select rowid from {tbl} where {dictcol} is null and :dictchoice = ({chooser}) limit :chunksize)",
-                        tbl = compressed_tablename,
-                        datacol = data_colname,
-                        dictcol = dict_colname,
-                        chooser = config.dict_chooser
-                    ),
-                    named_params!{
-                        ":lvl": config.compression_level, 
-                        ":dict": dict_id,
-                        ":dictchoice": &dict_choice,
-                        ":chunksize": chunk_size,
-                        ":compact": COMPACT
-                    },
-                ).context("compressing chunk")?;
-
-                total_updated += updated;
-                log::debug!("Compressed {} / {}", total_updated, todo.count);
-                if Instant::now() > end_limit {
-                    break;
-                }
-                let elapsed = update_start.elapsed();
-                if elapsed.div_f32(config.target_db_load) > elapsed {
-                    let sleep_duration = elapsed.div_f32(config.target_db_load) - elapsed;
-                    if sleep_duration > Duration::from_millis(1) {
-                        log::debug!(
-                            "Sleeping {}s to keep write load at {}",
-                            sleep_duration.as_secs_f32(),
-                            config.target_db_load
-                        );
-                        std::thread::sleep(sleep_duration);
-                    }
-                }
-
-                if updated == 0 {
-                    break;
-                }
-            }
-
-            let (total_size_after, total_count_after): (i64, i64) = db.query_row(
-                &format!(
-                    "select sum(length({datacol})), count(*) from {tbl} where {dictcol} = ?",
-                    tbl = compressed_tablename,
-                    datacol = data_colname,
-                    dictcol = dict_colname
-                ),
-                params![dict_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            if dict_is_new {
-                log::info!(
-                "Compressed {} rows with dict_choice={} (dict_id={}). Total size of entries before: {}, afterwards: {}, (average: before={}, after={})",
-                total_updated,
-                dict_choice,
-                dict_id,
-                pretty_bytes(todo.total_bytes),
-                pretty_bytes(total_size_after),
-                pretty_bytes(avg_sample_bytes),
-                pretty_bytes(total_size_after / total_count_after),
-            );
-            }
-            if Instant::now() > end_limit {
+        match maintenance_for_config(&db, config, end_limit)? {
+            MaintRet::TimeLimitReached => {
                 log::info!(
                     "time limit of {:.1}s reached, stopping with more maintenance work pending",
                     time_limit
                 );
                 return Ok(1.into());
             }
+            MaintRet::Completed => {}
         }
     }
     log::info!("All maintenance work completed!");
     Ok(0.into())
+}
+
+enum MaintRet {
+    TimeLimitReached,
+    Completed,
+}
+
+fn maintenance_for_config(
+    db: &Connection,
+    config: TransparentCompressConfig,
+    end_limit: Instant,
+) -> anyhow::Result<MaintRet> {
+    let compressed_tablename = escape_sqlite_identifier(&format!("_{}_zstd", config.table));
+    let data_colname = escape_sqlite_identifier(&config.column);
+    let dict_colname = escape_sqlite_identifier(&format!("_{}_dict", config.column));
+
+    let todos = db
+        .prepare(&format!(
+            "select
+            ({chooser}) as dict_choice,
+            count(*) as count,
+            sum(length({datacol})) as total_bytes
+        from {tbl} where {dictcol} is null group by dict_choice",
+            tbl = compressed_tablename,
+            dictcol = dict_colname,
+            datacol = data_colname,
+            chooser = config.dict_chooser
+        ))?
+        .query_map(params![], |row| {
+            Ok(TodoInfo {
+                dict_choice: row.get("dict_choice")?,
+                count: row.get("count")?,
+                total_bytes: row.get("total_bytes")?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let total_bytes_to_compress: i64 = todos
+        .iter()
+        .filter(|e| e.dict_choice.is_some())
+        .map(|e| e.total_bytes)
+        .sum();
+    let mut rows_compressed_so_far: i64 = 0;
+    let total_rows_to_compress: i64 = todos
+        .iter()
+        .filter(|e| e.dict_choice.is_some())
+        .map(|e| e.count)
+        .sum();
+    log::info!(
+        "{}.{}: Total {} rows ({}) to potentially compress.",
+        config.table,
+        config.column,
+        total_rows_to_compress,
+        pretty_bytes(total_bytes_to_compress)
+    );
+    for (_idx, todo) in todos.into_iter().enumerate() {
+        let avg_sample_bytes = todo.total_bytes / todo.count;
+        log::debug!(
+            "looking at group={}, has {} rows with {} average size ({} total)",
+            todo.dict_choice.as_deref().unwrap_or("[none]"),
+            todo.count,
+            pretty_bytes(avg_sample_bytes),
+            pretty_bytes(todo.total_bytes)
+        );
+
+        let dict_choice = match todo.dict_choice {
+            None => {
+                log::debug!("Skipping group, no dict chosen");
+                continue;
+            }
+            Some(e) => e,
+        };
+
+        let dict_id: Option<i32> = db
+            .query_row(
+                "select id from _zstd_dicts where chooser_key = ?",
+                params![dict_choice],
+                |row| row.get("id"),
+            )
+            .optional()?;
+        let (dict_id, dict_is_new) = match dict_id {
+            Some(id) => {
+                log::debug!(
+                    "Found existing dictionary id={} for key={}",
+                    id,
+                    dict_choice
+                );
+                (id, false)
+            }
+            None => {
+                let dict_target_size = (todo.total_bytes as f32 * config.dict_size_ratio) as i64;
+
+                if dict_target_size < config.min_dict_size_bytes_for_training {
+                    log::debug!(
+                        "Dictionary for group '{}' would be smaller than minimum ({} * {:.3} = {} < {}), ignoring",
+                        dict_choice,
+                        pretty_bytes(todo.total_bytes),
+                        config.dict_size_ratio,
+                        pretty_bytes(dict_target_size),
+                        pretty_bytes(config.min_dict_size_bytes_for_training)
+                    );
+                    continue;
+                }
+                let target_samples = (dict_target_size as f32 * config.train_dict_samples_ratio
+                    / avg_sample_bytes as f32) as i64; // use roughly 100x the size of the dictionary as data
+
+                log::debug!(
+                    "Training dict for key {} of size {}",
+                    dict_choice,
+                    pretty_bytes(dict_target_size)
+                );
+                let id = db.query_row(&format!(
+                    "select zstd_train_dict_and_save({datacol}, ?, ?, ?) as dictid from {tbl} where {dictcol} is null and ? = ({chooser})", 
+                    datacol=data_colname,
+                    tbl=compressed_tablename,
+                    dictcol=dict_colname,
+                    chooser=config.dict_chooser
+                ), params![dict_target_size, target_samples, dict_choice, dict_choice], |row| row.get("dictid"))?;
+                (id, true)
+            }
+        };
+        log::debug!(
+            "Compressing {} samples with key {} and level {}",
+            todo.count,
+            dict_choice,
+            config.compression_level
+        );
+        let mut total_updated = 0;
+        let mut chunk_size = config.incremental_compression_step_bytes / avg_sample_bytes;
+        if chunk_size < 1 {
+            chunk_size = 1;
+        }
+        loop {
+            let update_start = Instant::now();
+            let updated = db.execute(
+            &format!(
+                    "update {tbl} set {datacol} = zstd_compress_col({datacol}, :lvl, :dict, :compact), {dictcol} = :dict where rowid in (select rowid from {tbl} where {dictcol} is null and :dictchoice = ({chooser}) limit :chunksize)",
+                    tbl = compressed_tablename,
+                    datacol = data_colname,
+                    dictcol = dict_colname,
+                    chooser = config.dict_chooser
+                ),
+                named_params!{
+                    ":lvl": config.compression_level, 
+                    ":dict": dict_id,
+                    ":dictchoice": &dict_choice,
+                    ":chunksize": chunk_size,
+                    ":compact": COMPACT
+                },
+            ).context("compressing chunk")?;
+
+            total_updated += updated;
+            log::debug!("Compressed {} / {}", total_updated, todo.count);
+            if Instant::now() > end_limit {
+                break;
+            }
+            let elapsed = update_start.elapsed();
+            if elapsed.div_f32(config.target_db_load) > elapsed {
+                let sleep_duration = elapsed.div_f32(config.target_db_load) - elapsed;
+                if sleep_duration > Duration::from_millis(1) {
+                    log::debug!(
+                        "Sleeping {}s to keep write load at {}",
+                        sleep_duration.as_secs_f32(),
+                        config.target_db_load
+                    );
+                    std::thread::sleep(sleep_duration);
+                }
+            }
+
+            if updated == 0 {
+                break;
+            }
+        }
+
+        let (total_size_after, total_count_after): (i64, i64) = db.query_row(
+            &format!(
+                "select sum(length({datacol})), count(*) from {tbl} where {dictcol} = ?",
+                tbl = compressed_tablename,
+                datacol = data_colname,
+                dictcol = dict_colname
+            ),
+            params![dict_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if dict_is_new {
+            log::info!(
+            "Compressed {} rows with dict_choice={} (dict_id={}). Total size of entries before: {}, afterwards: {}, (average: before={}, after={})",
+            total_updated,
+            dict_choice,
+            dict_id,
+            pretty_bytes(todo.total_bytes),
+            pretty_bytes(total_size_after),
+            pretty_bytes(avg_sample_bytes),
+            pretty_bytes(total_size_after / total_count_after),
+        );
+        }
+        if Instant::now() > end_limit {
+            return Ok(MaintRet::TimeLimitReached);
+        }
+    }
+    Ok(MaintRet::Completed)
 }
 #[cfg(test)]
 mod tests {
