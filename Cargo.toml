@@ -15,6 +15,14 @@ build_extension = ["rusqlite/loadable_extension"]
 
 # debug_zstd = ["zstd/debug"]
 
+benchmark = ["structopt", "procfs", "rusqlite/backup"]
+
+all = ["benchmark"]
+
+[[bin]]
+name = "benchmark"
+required-features = ["benchmark"]
+
 [lib]
 crate-type = ["cdylib"]
 
@@ -33,6 +41,8 @@ log = "0.4.11"
 env_logger = "0.8.2"
 lazy_static = "1.4.0"
 lru_time_cache = "0.11.3"
+structopt = {version = "0.3.21", optional = true}
+procfs = {version = "0.9.1", optional = true}
 
 [dependencies.rusqlite]
 package = "rusqlite-le"

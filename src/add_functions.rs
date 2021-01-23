@@ -46,7 +46,7 @@ pub fn add_functions(db: &rusqlite::Connection) -> anyhow::Result<()> {
         zstd_enable_transparent(ctx).map_err(ah)
     })?;
 
-    db.create_scalar_function("zstd_incremental_maintenance", 1, nondeterministic, |ctx| {
+    db.create_scalar_function("zstd_incremental_maintenance", 2, nondeterministic, |ctx| {
         zstd_incremental_maintenance(ctx).map_err(ah)
     })?;
 
