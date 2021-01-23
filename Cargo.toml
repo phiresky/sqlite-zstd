@@ -15,7 +15,7 @@ build_extension = ["rusqlite/loadable_extension"]
 
 # debug_zstd = ["zstd/debug"]
 
-benchmark = ["structopt", "procfs", "rusqlite/backup"]
+benchmark = ["structopt", "procfs", "rusqlite/backup", "rusqlite/load_extension"]
 
 all = ["benchmark"]
 

@@ -15,6 +15,8 @@ struct Config {
     hdd_location: String,
     #[structopt(short, long)]
     sdd_location: String,
+    #[structopt(short, long)]
+    zstd_lib: String,
 }
 
 fn pragmas(db: &Connection) -> anyhow::Result<()> {
@@ -41,19 +43,19 @@ trait Bench {
     fn execute(&self, conn: &Connection) -> anyhow::Result<i64>;
 }
 struct SeqSelectBench {
-    ids: Vec<i64>,
+    ids: Vec<String>,
 }
 
 impl SeqSelectBench {
     fn prepare(conn: &Connection) -> anyhow::Result<SeqSelectBench> {
         Ok(SeqSelectBench {
-            ids: conn.prepare("select rowid from events where rowid >= (select rowid from events order by random() limit 1) order by timestamp_unix_ms asc limit 10000")?.query_map(params![], |r| r.get(0))?.collect::<Result<_, _>>()?
+            ids: conn.prepare("select id from events where timestamp_unix_ms >= (select timestamp_unix_ms from events order by random() limit 1) order by timestamp_unix_ms asc limit 10000")?.query_map(params![], |r| r.get(0))?.collect::<Result<_, _>>()?
         })
     }
 }
 impl Bench for SeqSelectBench {
     fn execute(&self, conn: &Connection) -> anyhow::Result<i64> {
-        let mut stmt = conn.prepare("select data from events where rowid = ?")?;
+        let mut stmt = conn.prepare("select data from events where id = ?")?;
         let mut total_len = 0;
         for id in &self.ids {
             let data: String = stmt.query_row(params![id], |r| r.get(0))?;
@@ -83,6 +85,7 @@ fn main() -> anyhow::Result<()> {
         std::fs::copy(&config.input_db_2, &db_path_2)?;
 
         println!("dropping caches");
+        assert!(std::process::Command::new("sync").status()?.success(), true);
         std::fs::OpenOptions::new()
             .read(false)
             .write(true)
@@ -93,8 +96,11 @@ fn main() -> anyhow::Result<()> {
 
         let mut db1 = Connection::open(db_path_1)?;
         pragmas(&db1).context("Could not set pragmas")?;
+        db1.load_extension(&config.zstd_lib, None)?;
         let mut db2 = Connection::open(db_path_2)?;
         pragmas(&db2).context("Could not set pragmas")?;
+        db2.load_extension(&config.zstd_lib, None)?;
+
         /*let (first_date, last_date): (i64, i64) = db.query_row(
             &format!(
                 "select min({t}), max({t}) from {tbl}",
@@ -108,13 +114,14 @@ fn main() -> anyhow::Result<()> {
 
         let benches: Vec<_> = (0..100)
             .map(|i| SeqSelectBench::prepare(&db1))
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .context("preparing benches")?;
 
         for db in &[&db1, &db2] {
             let mut total_count: i64 = 0;
             let before = Instant::now();
             for bench in &benches {
-                total_count += bench.execute(db)?;
+                total_count += bench.execute(db).context("executing bench")?;
             }
             let duration_s = before.elapsed().as_secs_f64();
             println!(
