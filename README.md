@@ -17,7 +17,7 @@ TODO: describe
 
     Enable transparent row-level compression of the given column on the given table.
 
-    The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries.
+    The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries. This function will not compress any data by itself, you need to call `zstd_incremental_maintenance` afterwards.
 
     `config` is a json object describing the configuration. See [TransparentCompressConfig](src/transparent.rs#L34) for detail.
 
@@ -35,6 +35,8 @@ TODO: describe
     db_load specifies the ratio of time the db will be locked with write queries. For example: if set to 0.5, after each write operation taking 2 seconds the maintenance function will sleep for 2 seconds so other processes have time to run write operations against the database. If set to 1, the maintenance will not sleep. Note that this is only useful if you run the incremental maintenance function in a separate thread or process than your other logic.
 
     Returns 1 if there is more work to be done, 0 if everything is compressed as it should.
+
+    Note that each call of this function has a start up time cost equivalent to `select * from table where dictid is null`, so longer durations are more efficient.
 
     This function can safely be interrupted at any time, each chunk of compression work is done as an atomic operation.
 
@@ -55,23 +57,24 @@ TODO: describe
 
     Compresses the given data, with the compression level (1 - 22, default 3)
 
-    if dictionary is a blob it will be directly used
-    if dictionary is an int i, it is functionally equivalent to `zstd_compress(data, level, (select dict from _zstd_dict where id = i))`
+    -   If dictionary is a blob it will be directly used
+    -   If dictionary is an int i, it is functionally equivalent to `zstd_compress(data, level, (select dict from _zstd_dict where id = i))`
+    -   If dictionary is not present, null, or -1, the data is compressed without a dictionary.
 
-    if compact is true, the output will be without magic header, without chekcsums, and without dictids. This will save 4 bytes when not using dictionaries and 8 bytes when using dictionaries.
-    the same must also be passed to the decompress function
+    if compact is true, the output will be without magic header, without checksums, and without dictids. This will save 4 bytes when not using dictionaries and 8 bytes when using dictionaries.
+    The same compact argument must also be passed to the decompress function.
 
 -   `zstd_decompress(data: blob, is_text: bool, dictionary: blob | int | null = null, compact: bool = false) -> text|blob`
 
     Decompresses the given data. if the dictionary is wrong, the result is undefined
 
-    If dictionary is a blob it will be directly used
-    If dictionary is an int i, it is functionally equivalent to `zstd_decompress(data, (select dict from _zstd_dict where id = i))`.
-    If dictionary is not present or null, it is assumed the data was compressed without a dictionary.
+    -   If dictionary is a blob it will be directly used
+    -   If dictionary is an int i, it is functionally equivalent to `zstd_decompress(data, (select dict from _zstd_dict where id = i))`.
+    -   If dictionary is not present, null, or -1, it is assumed the data was compressed without a dictionary.
 
     Note that passing dictionary as an int is recommended, since then the dictionary only has to be prepared once.
 
-    is_text specifies whether to output the data as text or as a blob. Note that when outputting as text the encoding depends on the sqlite database encoding.
+    is_text specifies whether to output the data as text or as a blob. Note that when outputting as text the encoding depends on the sqlite database encoding. sqlite-zstd is only tested with UTF-8.
 
     compact must be specified when the compress function was also called with compact.
 
@@ -89,6 +92,10 @@ TODO: describe
     ```
 
     Note that dict_size and sample_count are assumed to be constants.
+
+-   `zstd_train_dict_and_save(agg, dict_size: int, sample_count: int) -> int`
+
+    Same as `zstd_train_dict`, but the dictionary is saved to the `_zstd_dicts` table and the id is returned.
 
 # Installation
 

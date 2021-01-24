@@ -5,15 +5,11 @@ use rusqlite::functions::Context;
 
 use rusqlite::types::ToSqlOutput;
 use rusqlite::types::{Value, ValueRef};
-
-use std::{
-    borrow::Borrow,
-    io::Write,
-    ops::DerefMut,
-    sync::{Arc, Mutex},
-};
+use std::{io::Write, sync::Arc};
 use zstd::dict::DecoderDictionary;
 
+/// null_dict_is_passthrough is only true when called through the `zstd_compress_col` function (for transparent compression)
+/// with null_dict_is_passthrough, the behaviour is slightly changed: When dict is null, the data is passed through without compression.
 pub(crate) fn zstd_compress_fn<'a>(
     ctx: &Context,
     null_dict_is_passthrough: bool,
@@ -81,11 +77,11 @@ pub(crate) fn zstd_compress_fn<'a>(
             None => zstd::stream::write::Encoder::new(out, level),
         }
         .context("creating zstd encoder")?;
-        encoder
-            .get_operation_mut()
-            .context
-            .set_pledged_src_size(input_value.len() as u64)
-            .context("pledge")?;
+        /* encoder
+        .get_operation_mut()
+        .context
+        .set_pledged_src_size(input_value.len() as u64)
+        .context("pledge")?;*/
         if compact {
             encoder
                 .include_checksum(false)

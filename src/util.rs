@@ -14,14 +14,6 @@ pub fn ensure_dicts_table_exists(db: &rusqlite::Connection) -> rusqlite::Result<
     Ok(())
 }
 
-pub fn debug_row(r: &rusqlite::Row) {
-    let cols = r.column_names();
-    for (i, name) in cols.iter().enumerate() {
-        print!("{}={} ", name, format_blob(r.get_raw(i)))
-    }
-    println!();
-}
-
 /// format an expression while escaping given values as sqlite identifiers
 /// needed since prepared query parameters can't be used in identifier position
 /// (i'm too dumb for recursive macros)
@@ -54,6 +46,14 @@ pub fn ah(e: anyhow::Error) -> rusqlite::Error {
     rusqlite::Error::UserFunctionError(format!("{:?}", e).into())
 }
 
+/*pub fn debug_row(r: &rusqlite::Row) {
+    let cols = r.column_names();
+    for (i, name) in cols.iter().enumerate() {
+        print!("{}={} ", name, format_blob(r.get_ref_unwrap(i)))
+    }
+    println!();
+}
+
 fn format_blob(b: ValueRef) -> String {
     use ValueRef::*;
     match b {
@@ -63,7 +63,7 @@ fn format_blob(b: ValueRef) -> String {
         Text(i) => format!("'{}'", String::from_utf8_lossy(i).replace("'", "''")),
         Blob(b) => format!("[blob {}B]", b.len()),
     }
-}
+}*/
 
 ///
 /// adapted from https://github.com/jgallagher/rusqlite/blob/022266239233857faa7f0b415c1a3d5095d96a53/src/vtab/mod.rs#L629
