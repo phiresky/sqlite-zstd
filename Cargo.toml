@@ -28,6 +28,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 zstd = {version = "0.6.0", git="https://github.com/phiresky/zstd-rs", branch="master", features=["bindgen"] }
+zstd-safe = {version = "*", git="https://github.com/phiresky/zstd-rs", branch="master", features=["bindgen"] }
 #zstd = {version = "0.5.3", path="../zstd-rs"}
 #zstd = {version = "=0.5.4"}
 anyhow = "1.0.36"

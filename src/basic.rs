@@ -82,6 +82,8 @@ pub(crate) fn zstd_compress_fn<'a>(
         }
         .context("creating zstd encoder")?;
         encoder
+            .get_operation_mut()
+            .context
             .set_pledged_src_size(input_value.len() as u64)
             .context("pledge")?;
         if compact {
