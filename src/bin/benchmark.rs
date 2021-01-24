@@ -1,25 +1,28 @@
 #![cfg(feature = "benchmark")]
 
 use anyhow::Context;
+use anyhow::Result;
+use rand::seq::SliceRandom;
 use rusqlite::{params, Connection, OpenFlags};
-use std::{fs::File, path::Path};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+};
 use std::{io::Write, time::Instant};
 use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 struct Config {
     #[structopt(short, long)]
-    input_db_1: String,
+    input_db: Vec<String>,
     #[structopt(short, long)]
-    input_db_2: String,
-    #[structopt(short, long)]
-    hdd_location: String,
-    #[structopt(short, long)]
-    sdd_location: String,
+    location: Vec<String>,
     #[structopt(short, long)]
     zstd_lib: String,
+    #[structopt(short, long)]
+    hot_cache: bool,
 }
 
-fn pragmas(db: &Connection) -> anyhow::Result<()> {
+fn pragmas(db: &Connection) -> Result<()> {
     //let want_page_size = 32768;
     //db.execute(&format!("pragma page_size = {};", want_page_size))
     //    .context("setup pragma 1")?;
@@ -40,21 +43,35 @@ fn pragmas(db: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 trait Bench {
-    fn execute(&self, conn: &Connection) -> anyhow::Result<i64>;
+    fn name(&self) -> &str;
+    fn execute(&self, conn: &Connection) -> Result<i64>;
 }
-struct SeqSelectBench {
+struct SelectBench {
+    name: &'static str,
     ids: Vec<String>,
 }
 
-impl SeqSelectBench {
-    fn prepare(conn: &Connection) -> anyhow::Result<SeqSelectBench> {
-        Ok(SeqSelectBench {
+fn prepare_sequential_select(conn: &Connection) -> Result<Box<dyn Bench>> {
+    Ok(Box::new(SelectBench {
+        name: "sequential-select",
             ids: conn.prepare("select id from events where timestamp_unix_ms >= (select timestamp_unix_ms from events order by random() limit 1) order by timestamp_unix_ms asc limit 10000")?.query_map(params![], |r| r.get(0))?.collect::<Result<_, _>>()?
-        })
-    }
+        }))
 }
-impl Bench for SeqSelectBench {
-    fn execute(&self, conn: &Connection) -> anyhow::Result<i64> {
+fn prepare_random_select(conn: &Connection) -> Result<Box<dyn Bench>> {
+    Ok(Box::new(SelectBench {
+        name: "random-select",
+        ids: conn
+            .prepare("select id from events order by random() limit 10000")?
+            .query_map(params![], |r| r.get(0))?
+            .collect::<Result<_, _>>()?,
+    }))
+}
+
+impl Bench for SelectBench {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn execute(&self, conn: &Connection) -> Result<i64> {
         let mut stmt = conn.prepare("select data from events where id = ?")?;
         let mut total_len = 0;
         for id in &self.ids {
@@ -62,11 +79,30 @@ impl Bench for SeqSelectBench {
             total_len += data.len();
         }
 
-        println!("total bytes got: {}", total_len);
+        // eprintln!("total bytes got: {}", total_len);
         Ok(self.ids.len() as i64)
     }
 }
-fn main() -> anyhow::Result<()> {
+
+fn drop_caches() -> Result<()> {
+    eprintln!("dropping caches");
+    assert!(std::process::Command::new("sync").status()?.success(), true);
+    std::fs::OpenOptions::new()
+        .read(false)
+        .write(true)
+        .open("/proc/sys/vm/drop_caches")
+        .context("Could not open drop caches")?
+        .write_all(b"3")
+        .context("Could not drop caches")?;
+    Ok(())
+}
+
+struct BenchTarget {
+    total_count: i64,
+    total_duration_s: f64,
+    path: PathBuf,
+}
+fn main() -> Result<()> {
     if cfg!(debug_assertions) {
         panic!("benching must be done in prod mode, otherwise the results are useless");
     }
@@ -76,59 +112,92 @@ fn main() -> anyhow::Result<()> {
     let table = "events";
     let time_column = "timestamp_unix_ms";
 
-    for (name, location) in vec![("hdd", config.hdd_location)] {
-        println!("{} at {}", name, location);
+    let its_per_bench = 50;
 
-        let db_path_1 = Path::new(&location).join("db1.sqlite3");
-        let db_path_2 = Path::new(&location).join("db2.sqlite3");
-        std::fs::copy(&config.input_db_1, &db_path_1)?;
-        std::fs::copy(&config.input_db_2, &db_path_2)?;
+    println!("location,db filename,test name,iterations/s,number of samples");
 
-        println!("dropping caches");
-        assert!(std::process::Command::new("sync").status()?.success(), true);
-        std::fs::OpenOptions::new()
-            .read(false)
-            .write(true)
-            .open("/proc/sys/vm/drop_caches")
-            .context("Could not open drop caches")?
-            .write_all(b"3")
-            .context("Could not drop caches")?;
+    let benches: Vec<Vec<_>> = {
+        let mut db1 =
+            Connection::open_with_flags(&config.input_db[0], OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
-        let mut db1 = Connection::open(db_path_1)?;
-        pragmas(&db1).context("Could not set pragmas")?;
-        db1.load_extension(&config.zstd_lib, None)?;
-        let mut db2 = Connection::open(db_path_2)?;
-        pragmas(&db2).context("Could not set pragmas")?;
-        db2.load_extension(&config.zstd_lib, None)?;
+        let preparers = vec![
+            Box::new(prepare_random_select) as Box<dyn Fn(&Connection) -> Result<Box<dyn Bench>>>,
+            Box::new(prepare_sequential_select),
+        ];
+        preparers
+            .iter()
+            .map(|preparer| {
+                (0..its_per_bench)
+                    .map(|i| preparer(&db1))
+                    .collect::<Result<_, _>>()
+                    .context("preparing benches")
+            })
+            .collect::<Result<_, _>>()?
+    };
 
-        /*let (first_date, last_date): (i64, i64) = db.query_row(
-            &format!(
-                "select min({t}), max({t}) from {tbl}",
-                t = time_column,
-                tbl = table
-            ),
-            params![],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        println!("min time {}, max time {}", first_date, last_date);*/
+    for locjoi in config.location {
+        let (location_name, location) = {
+            let vec: Vec<_> = locjoi.splitn(2, ':').collect();
+            (vec[0], vec[1])
+        };
+        eprintln!("{} at {}", location_name, location);
 
-        let benches: Vec<_> = (0..100)
-            .map(|i| SeqSelectBench::prepare(&db1))
-            .collect::<Result<_, _>>()
-            .context("preparing benches")?;
+        let db_paths = config
+            .input_db
+            .iter()
+            .map(|input_db| {
+                let pb = PathBuf::from(input_db);
+                let file_name = pb.file_name().unwrap();
 
-        for db in &[&db1, &db2] {
-            let mut total_count: i64 = 0;
-            let before = Instant::now();
-            for bench in &benches {
-                total_count += bench.execute(db).context("executing bench")?;
+                let db_path = Path::new(&location).join(file_name);
+                if !db_path.exists() {
+                    eprintln!("copying {} -> {}", input_db, db_path.to_string_lossy());
+                    std::fs::copy(&input_db, &db_path)?;
+                } else {
+                    eprintln!(
+                        "{} already exists, assuming it's the same",
+                        file_name.to_string_lossy()
+                    );
+                }
+                Ok(db_path)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for bench_its in &benches {
+            let mut targets: Vec<_> = db_paths
+                .iter()
+                .map(|path| BenchTarget {
+                    total_count: 0,
+                    total_duration_s: 0.0,
+                    path: path.clone(),
+                })
+                .collect();
+            for bench in bench_its {
+                if !config.hot_cache {
+                    drop_caches()?;
+                }
+                // shuffle to make sure there is no crosstalk
+                targets.shuffle(&mut rand::thread_rng());
+
+                for target in targets.iter_mut() {
+                    let db = Connection::open(&target.path)?;
+                    pragmas(&db).context("Could not set pragmas")?;
+                    db.load_extension(&config.zstd_lib, None)?;
+                    let before = Instant::now();
+                    target.total_count += bench.execute(&db).context("executing bench")?;
+                    target.total_duration_s += before.elapsed().as_secs_f64();
+                }
             }
-            let duration_s = before.elapsed().as_secs_f64();
-            println!(
-                "{} iterations/s (n={})",
-                total_count as f64 / duration_s,
-                total_count
-            );
+            targets.sort_by_key(|e| e.path.clone());
+            for target in &targets {
+                println!(
+                    "{},{},{},{},{}",
+                    location_name,
+                    target.path.file_name().unwrap().to_string_lossy(),
+                    bench_its[0].name(),
+                    target.total_count as f64 / target.total_duration_s,
+                    target.total_count
+                );
+            }
         }
     }
 

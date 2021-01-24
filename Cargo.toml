@@ -15,7 +15,7 @@ build_extension = ["rusqlite/loadable_extension"]
 
 # debug_zstd = ["zstd/debug"]
 
-benchmark = ["structopt", "procfs", "rusqlite/backup", "rusqlite/load_extension"]
+benchmark = ["structopt", "procfs", "rusqlite/backup", "rusqlite/load_extension", "rand"]
 
 all = ["benchmark"]
 
@@ -32,7 +32,6 @@ zstd-safe = {version = "*", git="https://github.com/phiresky/zstd-rs", branch="m
 #zstd = {version = "0.5.3", path="../zstd-rs"}
 #zstd = {version = "=0.5.4"}
 anyhow = "1.0.36"
-rand = "0.8.0"
 serde_json = "1.0.60"
 serde = { version = "1.0.118", features = ["derive"] }
 
@@ -44,6 +43,7 @@ lazy_static = "1.4.0"
 lru_time_cache = "0.11.3"
 structopt = {version = "0.3.21", optional = true}
 procfs = {version = "0.9.1", optional = true}
+rand = {version="0.8.2", optional=true}
 
 [dependencies.rusqlite]
 package = "rusqlite-le"
