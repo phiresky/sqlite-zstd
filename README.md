@@ -27,6 +27,7 @@ TODO: describe
     -   The primary key must not be null for any row, otherwise updating may not work as expected
     -   sqlite3_changes() will return 0 for modifying queries ([see here](https://sqlite.org/c3ref/changes.html)).
     -   The SQLite streaming blob reading API will be somewhat useless since the blob is fully copied into memory anyways.
+    -   Attaching a database containing compressed tables using `ATTACH 'foo.db'` is not supported.
 
 -   `zstd_incremental_maintenance(duration_seconds: float, db_load: float)`
 

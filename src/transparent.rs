@@ -910,7 +910,7 @@ mod tests {
     fn delete_one(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         let updc = db
             .execute("delete from events where id = ?", params![id])
-            .context("updating other column")?;
+            .context("deleting from events by id")?;
         //assert_eq!(updc, 1);
         Ok(())
     }
@@ -923,7 +923,7 @@ mod tests {
         )?;
         let updc = db
             .execute("delete from events where timestamp = ?", params![ts])
-            .context("updating other column")?;
+            .context("deleting by timestamp")?;
         //assert_eq!(updc, 1);
         Ok(())
     }

@@ -3,7 +3,7 @@ name: CICD
 # adapted from https://github.com/bootandy/dust/blob/master/.github/workflows/CICD.yml
 
 env:
-    PROJECT_NAME: sqlite-zstd
+    PROJECT_NAME: sqlite_zstd
     #PROJECT_DESC: "sqlite ♥ zstd"
     #PROJECT_AUTH: "bootandy"
     #RUST_MIN_SRV: "1.31.0"
@@ -120,10 +120,12 @@ jobs:
                   echo set-output name=STAGING::${STAGING}
                   echo ::set-output name=STAGING::${STAGING}
                   # determine EXE suffix
-                  EXE_suffix="" ; case ${{ matrix.job.target }} in *-pc-windows-*) EXE_suffix=".exe" ;; esac;
-                  case ${{ matrix.job.target }} in *-linux-*) EXE_suffix=".so" ;; *-apple-*) EXE_suffix=".dylib" ;; *-windows-*) EXE_suffix=".dll" ;; esac;
-                  echo set-output name=EXE_suffix::${EXE_suffix}
-                  echo ::set-output name=EXE_suffix::${EXE_suffix}
+                  case ${{ matrix.job.target }} in
+                    *-linux-*) EXE_suffix=".so"; EXE_prefix="lib" ;;
+                    *-apple-*) EXE_suffix=".dylib"; EXE_prefix="lib" ;;
+                    *-windows-*) EXE_suffix=".dll"; EXE_prefix="" ;; esac;
+                  echo set-output name=LIB_FNAME::${EXE_prefix}${{ env.PROJECT_NAME }}${EXE_suffix}
+                  echo ::set-output name=LIB_FNAME::${EXE_prefix}${{ env.PROJECT_NAME }}${EXE_suffix}
                   # parse commit reference info
                   REF_NAME=${GITHUB_REF#refs/*/}
                   unset REF_BRANCH ; case ${GITHUB_REF} in refs/heads/*) REF_BRANCH=${GITHUB_REF#refs/heads/} ;; esac;
@@ -203,14 +205,14 @@ jobs:
               uses: actions/upload-artifact@master
               with:
                   name: ${{ env.PROJECT_NAME }}-${{ matrix.job.target }}
-                  path: target/${{ matrix.job.target }}/release/${{ env.PROJECT_NAME }}${{ steps.vars.outputs.EXE_suffix }}
+                  path: target/${{ matrix.job.target }}/release/${{ steps.vars.outputs.LIB_FNAME }}
             - name: Package
               shell: bash
               run: |
                   # binary
-                  cp 'target/${{ matrix.job.target }}/release/${{ env.PROJECT_NAME }}${{ steps.vars.outputs.EXE_suffix }}' '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
+                  cp 'target/${{ matrix.job.target }}/release/${{ steps.vars.outputs.LIB_FNAME }}' '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
                   # `strip` binary (if needed)
-                  if [ -n "${{ steps.vars.outputs.STRIP }}" ]; then "${{ steps.vars.outputs.STRIP }}" '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/${{ env.PROJECT_NAME }}${{ steps.vars.outputs.EXE_suffix }}' ; fi
+                  if [ -n "${{ steps.vars.outputs.STRIP }}" ]; then "${{ steps.vars.outputs.STRIP }}" '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/${{ steps.vars.outputs.LIB_FNAME }}' ; fi
                   # README and LICENSE
                   cp README.md '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
                   cp LICENSE '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
