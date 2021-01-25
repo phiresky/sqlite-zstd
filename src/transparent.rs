@@ -46,8 +46,11 @@ pub struct TransparentCompressConfig {
     /// An SQL expression that chooses which dict to use or returns null if data should stay uncompressed for now
     /// Examples:
     ///
+    /// * `'a'`
+    ///     This will cause a single dictionary to be trained for everything.
+    ///
     /// * `strftime(created, '%Y-%m')`
-    ///     this will cause every month of data to be compressed with its own dictionary.
+    ///     This will cause every month of data to be compressed with its own dictionary.
     ///
     /// * `nullif(strftime(created, '%Y-%m'), strftime('now', '%Y-%m'))`
     ///
@@ -193,7 +196,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     }
     if primary_key_columns.is_empty() {
         anyhow::bail!(
-            "Table {} does not have a primary key, sqlite-zstd only works on tables with primary keys",
+            "Table {} does not have a primary key, sqlite-zstd only works on tables with primary keys.",
             table_name
         );
     }
@@ -226,7 +229,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         db.query_row(&query, params![], |row| row.get::<_, String>(0))
             .optional()
             .with_context(|| format!("Tried to execute:\n{}", query))
-            .context(r#"Dict chooser expression does not seem to be valid. Make sure you get your escaping right: If you want an sqlite string inside a json string inside a sqlite string you need to do '{"foo": "''bar''"}'"#)?;
+            .context(r#"Dict chooser expression does not seem to be valid. Make sure you return a string and get your escaping right: If you want an sqlite string inside a json string inside a sqlite string you need to do '{"foo": "''bar''"}'"#)?;
     }
     {
         // can't use prepared statement at these positions
@@ -591,17 +594,19 @@ fn maintenance_for_todo(
                 dict_is_new,
             } => (dict_id, dict_is_new),
         };
-    log::debug!(
-        "Compressing {} samples with key {} and level {}",
-        todo.count,
-        dict_choice,
-        config.compression_level
-    );
+
     let mut total_updated: i64 = 0;
     let mut chunk_size = config.incremental_compression_step_bytes / avg_sample_bytes;
     if chunk_size < 1 {
         chunk_size = 1;
     }
+    log::debug!(
+        "Compressing {} samples with key {} and level {}, chunksize {}",
+        todo.count,
+        dict_choice,
+        config.compression_level,
+        chunk_size
+    );
     loop {
         let update_start = Instant::now();
         let q = &format!(

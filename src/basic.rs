@@ -179,7 +179,7 @@ fn zstd_decompress_inner<'a>(
         decoder.into_inner()
     };
 
-    dict; // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
+    // dict; // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
     if output_text {
         Ok(ToSqlOutput::Owned(Value::Text(
             // converted right back to &u8 in https://docs.rs/rusqlite/0.21.0/src/rusqlite/types/value_ref.rs.html#107

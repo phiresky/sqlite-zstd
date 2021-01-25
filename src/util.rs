@@ -1,5 +1,4 @@
 use log::LevelFilter;
-use rusqlite::types::ValueRef;
 
 pub fn ensure_dicts_table_exists(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     db.execute(
