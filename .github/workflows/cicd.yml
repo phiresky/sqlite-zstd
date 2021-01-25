@@ -121,6 +121,7 @@ jobs:
                   echo ::set-output name=STAGING::${STAGING}
                   # determine EXE suffix
                   EXE_suffix="" ; case ${{ matrix.job.target }} in *-pc-windows-*) EXE_suffix=".exe" ;; esac;
+                  case ${{ matrix.job.target }} in *-linux-*) EXE_suffix=".so" ;; *-apple-*) EXE_suffix=".dylib" ;; *-windows-*) EXE_suffix=".dll" ;; esac;
                   echo set-output name=EXE_suffix::${EXE_suffix}
                   echo ::set-output name=EXE_suffix::${EXE_suffix}
                   # parse commit reference info
