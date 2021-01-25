@@ -93,7 +93,16 @@ pub mod tests {
                 .take(10)
                 .collect();
         };
-        let mut db = Connection::open_in_memory().context("opening memory db")?;
+        let mut db = if std::env::var("TEST_TO_FILE").is_ok() {
+            let db_fname = format!(
+                "/tmp/foo.{}.sqlite3",
+                rand::distributions::Uniform::from(0..10000).sample(&mut rand::thread_rng())
+            );
+            log::debug!("writing temp db to {}", db_fname);
+            Connection::open(db_fname)?
+        } else {
+            Connection::open_in_memory().context("opening memory db")?
+        };
         add_functions(&db).context("adding functions")?;
         db.execute_batch(
             "

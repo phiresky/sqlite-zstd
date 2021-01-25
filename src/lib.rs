@@ -15,11 +15,12 @@ mod util;
 
 pub use log::LevelFilter as LogLevel;
 
-/// Loads the sqlite extension with the default log level
+/// Loads the sqlite extension with the default log level (INFO)
 pub fn load(connection: &Connection) -> anyhow::Result<()> {
     load_with_loglevel(connection, LogLevel::Info)
 }
 
+/// Loads the sqlite extension with the given log level
 pub fn load_with_loglevel(
     connection: &Connection,
     default_log_level: LogLevel,
