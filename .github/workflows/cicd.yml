@@ -12,7 +12,7 @@ on: [push, pull_request]
 
 jobs:
     style:
-        name: Style
+        name: Tests
         runs-on: ${{ matrix.job.os }}
         strategy:
             fail-fast: false
@@ -49,6 +49,11 @@ jobs:
               with:
                   command: clippy
                   args: ${{ matrix.job.cargo-options }} ${{ steps.vars.outputs.CARGO_FEATURES_OPTION }} -- -D warnings
+            - name: "tests"
+              if: success() || failure() # run regardless of prior step
+              uses: actions-rs/cargo@v1
+              with:
+                  command: test
 
     build:
         name: Build
@@ -162,16 +167,6 @@ jobs:
                   CARGO_USE_CROSS='true' ; case '${{ matrix.job.use-cross }}' in ''|0|f|false|n|no) unset CARGO_USE_CROSS ;; esac;
                   echo set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS:-<empty>/false}
                   echo ::set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS}
-                  # # * `arm` cannot be tested on ubuntu-* hosts (b/c testing is currently primarily done via comparison of target outputs with built-in outputs and the `arm` target is not executable on the host)
-                  JOB_DO_TESTING="true"
-                  case ${{ matrix.job.target }} in arm-*) unset JOB_DO_TESTING ;; esac;
-                  echo set-output name=JOB_DO_TESTING::${JOB_DO_TESTING:-<empty>/false}
-                  echo ::set-output name=JOB_DO_TESTING::${JOB_DO_TESTING}
-                  # # * test only binary for arm-type targets
-                  unset CARGO_TEST_OPTIONS
-                  unset CARGO_TEST_OPTIONS ; case ${{ matrix.job.target }} in arm-*) CARGO_TEST_OPTIONS="--bin ${PROJECT_NAME}" ;; esac;
-                  echo set-output name=CARGO_TEST_OPTIONS::${CARGO_TEST_OPTIONS}
-                  echo ::set-output name=CARGO_TEST_OPTIONS::${CARGO_TEST_OPTIONS}
                   # * strip executable?
                   STRIP="strip" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; esac;
                   echo set-output name=STRIP::${STRIP}
@@ -203,12 +198,6 @@ jobs:
                   use-cross: ${{ steps.vars.outputs.CARGO_USE_CROSS }}
                   command: build
                   args: --release --target=${{ matrix.job.target }} ${{ matrix.job.cargo-options }} ${{ steps.vars.outputs.CARGO_FEATURES_OPTION }}
-            - name: Test
-              uses: actions-rs/cargo@v1
-              with:
-                  use-cross: ${{ steps.vars.outputs.CARGO_USE_CROSS }}
-                  command: test
-                  args: --target=${{ matrix.job.target }} ${{ steps.vars.outputs.CARGO_TEST_OPTIONS}} ${{ matrix.job.cargo-options }} ${{ steps.vars.outputs.CARGO_FEATURES_OPTION }}
             - name: Archive executable artifacts
               uses: actions/upload-artifact@master
               with:

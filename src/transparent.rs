@@ -894,7 +894,7 @@ mod tests {
                 "update events set data = 'testingxy' where id in (?, ?)",
                 params![id, id2],
             )
-            .context("updating")?;
+            .context("updating two rows replace compressed")?;
         //assert_eq!(updc, 2);
         //thread::rand
         let updc = db
@@ -902,7 +902,7 @@ mod tests {
                 "update events set timestamp='1234' where data = 'testingxy'",
                 params![],
             )
-            .context("updating where compressed")?;
+            .context("updating where compressed=...")?;
         //assert_eq!(updc, 2);
         Ok(())
     }
@@ -952,7 +952,7 @@ mod tests {
                     let (db1, db2) = get_two_dbs().context("Could not create databases")?;
                     if compress_first {
                         let done: i64 = db2.query_row(
-                            "select zstd_incremental_maintenance(9999999)",
+                            "select zstd_incremental_maintenance(9999999, 1)",
                             params![],
                             |r| r.get(0),
                         )?;

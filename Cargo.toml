@@ -31,8 +31,8 @@ required-features = ["benchmark"]
 crate-type = ["cdylib"]
 
 [dependencies]
-zstd = {version = "0.6.0", git="https://github.com/phiresky/zstd-rs", branch="master", features=["bindgen"] }
-zstd-safe = {version = "3.0.0", git="https://github.com/phiresky/zstd-rs", branch="master", features=["bindgen"] }
+zstd = {version = "0.6.0", git="https://github.com/phiresky/zstd-rs", branch="master"}
+zstd-safe = {version = "3.0.0", git="https://github.com/phiresky/zstd-rs", branch="master" }
 #zstd = {version = "0.5.3", path="../zstd-rs"}
 #zstd = {version = "=0.5.4"}
 anyhow = "1.0.36"
