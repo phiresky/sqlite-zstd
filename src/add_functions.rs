@@ -109,7 +109,8 @@ pub mod tests {
             create table events (
                 id integer primary key not null,
                 timestamp text not null,
-                data text not null
+                data text not null,
+                another_col text
             );
         ",
         )?;
@@ -175,12 +176,14 @@ pub mod tests {
             let tx = db.transaction()?;
             {
                 let mut insert =
-                    tx.prepare("insert into events (timestamp, data) values (?, ?)")?;
+                    tx.prepare(
+                        "insert into events (timestamp, data, another_col) values (?, ?, ?)")?;
                 let date = chrono::Utc.ymd(2021, 1, 1).and_hms(0, 0, 0);
                 for (i, d) in data.enumerate() {
                     insert.execute(params![
                         (date + chrono::Duration::seconds(30) * (i as i32)).to_rfc3339(),
-                        serde_json::to_string_pretty(&d)?
+                        serde_json::to_string_pretty(&d)?,
+                        "rustacean"
                     ])?;
                 }
             }

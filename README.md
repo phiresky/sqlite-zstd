@@ -8,7 +8,15 @@ Depending on the data, this can reduce the size of the database by 90% while kee
 
 -   `zstd_enable_transparent(config)`
 
-    Enable transparent row-level compression of the given column on the given table.
+    Enable transparent row-level compression of the given column on the given table. 
+
+    You call this function several times on the same table with different columns to compress.
+    ```sql
+        SELECT 
+            zstd_enable_transparent('{"table": "objects", "column": "data1", "compression_level": 19, "dict_chooser": "''a''"}'),
+            zstd_enable_transparent('{"table": "objects", "column": "data2", "compression_level": 19, "dict_chooser": "''a''"}')
+
+    ```
 
     The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries. This function will not compress any data by itself, you need to call `zstd_incremental_maintenance` afterwards.
 
