@@ -172,7 +172,10 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         .map(|c| &c.column[..])
         .collect::<Vec<&str>>();
 
-    log::debug!("already compressed columns={:?}", already_compressed_columns);
+    log::debug!(
+        "already compressed columns={:?}",
+        already_compressed_columns
+    );
 
     if already_compressed_columns.contains(&&config.column[..]) {
         anyhow::bail!(
@@ -191,9 +194,8 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             &new_table_name
         );
         log::debug!("dict_id_columns query {:?}", query);
-        db
-            .prepare(&query)?
-            .query_map(params![], |row| {Ok(row.get("from")?)})
+        db.prepare(&query)?
+            .query_map(params![], |row| Ok(row.get("from")?))
             .context("Could not get dicts ids info")?
             .collect::<Result<Vec<String>, _>>()?
     } else {
@@ -202,24 +204,37 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
 
     log::debug!("dict_id columns={:?}", dict_id_columns);
 
-    check_table_exists(&db, table_name, &new_table_name, table_already_enabled)?;
+    if !check_table_exists(
+        &db,
+        if table_already_enabled {
+            &new_table_name
+        } else {
+            table_name
+        },
+    ) {
+        anyhow::bail!("Table {} doesn't exist", table_name);
+    }
 
     let columns_info: Vec<ColumnInfo> = db
-        .prepare(
-            &format_sqlite!(
-                r#"pragma table_info({})"#, 
-                if table_already_enabled {&new_table_name} else {&table_name}))?
+        .prepare(&format_sqlite!(
+            r#"pragma table_info({})"#,
+            if table_already_enabled {
+                &new_table_name
+            } else {
+                &table_name
+            }
+        ))?
         .query_map(params![], |row| {
             let col_name: String = row.get("name")?;
-            let to_compress = (&col_name == &config.column)
-             || (already_compressed_columns.contains(&&col_name[..]));
+            let to_compress = (col_name == config.column)
+                || (already_compressed_columns.contains(&&col_name[..]));
             let is_dict_id = dict_id_columns.contains(&col_name);
             Ok(ColumnInfo {
                 name: col_name,
                 is_primary_key: row.get("pk")?,
                 coltype: row.get("type")?,
-                to_compress: to_compress,
-                is_dict_id: is_dict_id,
+                to_compress,
+                is_dict_id,
             })
         })
         .context("Could not query table_info")?
@@ -319,12 +334,14 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     }
 
     create_or_replace_view(
-        &db, &columns_info, table_name, 
-        &new_table_name, table_already_enabled)?;
+        &db,
+        &columns_info,
+        table_name,
+        &new_table_name,
+        table_already_enabled,
+    )?;
 
-    create_insert_trigger(
-        &db, &columns_info, table_name,
-        &new_table_name, &config)?;
+    create_insert_trigger(&db, &columns_info, table_name, &new_table_name, &config)?;
 
     // a WHERE statement that selects a row based on the primary key
     let primary_key_condition = primary_key_columns
@@ -332,79 +349,70 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         .map(|c| format_sqlite!("old.{0} = {0}", &c.name))
         .collect::<Vec<String>>()
         .join(" and ");
-    
+
     // add delete trigger
-    create_delete_trigger(
-        &db, table_name,
-        &new_table_name, 
-        &primary_key_condition
-    )?;
+    create_delete_trigger(&db, table_name, &new_table_name, &primary_key_condition)?;
 
     // update trigger
     create_update_triggers(
-        &db, &columns_info, table_name,
+        &db,
+        &columns_info,
+        table_name,
         &new_table_name,
-        &primary_key_condition, &config
+        &primary_key_condition,
+        &config,
     )?;
-    
+
     db.commit().context("Could not commit transaction")?;
     Ok(ToSqlOutput::Owned(Value::Text("Done!".to_string())))
 }
-
 
 fn get_dict_id(column_name: &str) -> String {
     format!("_{}_dict", column_name)
 }
 
-
-fn check_table_exists(
-        db: &rusqlite::Connection, 
-        table_name: &str,
-        internal_table_name: &str,
-        table_already_enabled: bool) -> anyhow::Result<()> {
+fn check_table_exists(db: &rusqlite::Connection, table_name: &str) -> bool {
     let table_count: u32 = db
         .query_row(
             "select count(`type`) from sqlite_master where name = ? and type = 'table'",
-            params![if table_already_enabled {internal_table_name} else {table_name}],
+            params![table_name],
             |r| r.get(0),
         )
-        .with_context(|| format!("Could not get table information for {}", table_name))?;
+        .unwrap_or(0);
     if table_count == 0 {
-        anyhow::bail!("Table {} doesn't exist", table_name);
+        return false;
     }
-    Ok(())
+    true
 }
 
-
 fn check_columns_to_compress_are_not_indexed(
-    db: &rusqlite::Connection, 
-    columns_info: &Vec<ColumnInfo>,
-    table_name: &str) -> anyhow::Result<()> {
+    db: &rusqlite::Connection,
+    columns_info: &[ColumnInfo],
+    table_name: &str,
+) -> anyhow::Result<()> {
     let indexed_columns: HashMap<String, String> = db
-        .prepare("
+        .prepare(
+            "
             select distinct ii.name as column_name, il.name as index_name
             from sqlite_master as m,
             pragma_index_list(m.name) as il,
             pragma_index_info(il.name) as ii
-            where m.type='table' AND m.name=?")?
+            where m.type='table' AND m.name=?",
+        )?
         .query_map(params![table_name], |row| {
-            Ok(
-                (row.get("column_name")?, row.get("index_name")?)
-            )
+            Ok((row.get("column_name")?, row.get("index_name")?))
         })
         .context("could not get indices info")?
         .collect::<Result<_, rusqlite::Error>>()?;
 
     let indexed_columns_to_compress = columns_info
         .iter()
-        .filter(|c| {
-           match indexed_columns.get(&c.name) {
+        .filter(|c| match indexed_columns.get(&c.name) {
             Some(_) => c.to_compress,
-            None => false
-           }
+            None => false,
         })
         .collect::<Vec<&ColumnInfo>>();
-        
+
     if !indexed_columns_to_compress.is_empty() {
         let columns_indices = indexed_columns_to_compress
             .iter()
@@ -417,17 +425,14 @@ fn check_columns_to_compress_are_not_indexed(
 }
 
 fn create_or_replace_view(
-    db: &rusqlite::Connection, 
-    columns_info: &Vec<ColumnInfo>,
+    db: &rusqlite::Connection,
+    columns_info: &[ColumnInfo],
     table_name: &str,
     internal_table_name: &str,
-    table_already_enabled: bool) -> anyhow::Result<()> {
-
+    table_already_enabled: bool,
+) -> anyhow::Result<()> {
     if table_already_enabled {
-        let dropview_query = format!(
-            r#"drop view {}"#,
-            escape_sqlite_identifier(&table_name)
-        );
+        let dropview_query = format!(r#"drop view {}"#, escape_sqlite_identifier(&table_name));
         log::debug!("[run] {}", &dropview_query);
         db.execute(&dropview_query, params![])
             .context("Could not drop view")?;
@@ -477,11 +482,11 @@ fn create_or_replace_view(
 
 fn create_insert_trigger(
     db: &rusqlite::Connection,
-    columns_info: &Vec<ColumnInfo>,
+    columns_info: &[ColumnInfo],
     table_name: &str,
     internal_table_name: &str,
-    config: &TransparentCompressConfig) -> anyhow::Result<()> {
-
+    config: &TransparentCompressConfig,
+) -> anyhow::Result<()> {
     let trigger_name = format!("{}_insert_trigger", table_name);
 
     // insert trigger
@@ -490,7 +495,7 @@ fn create_insert_trigger(
 
     for c in columns_info {
         if c.is_dict_id {
-            continue
+            continue;
         }
         columns_selection.push(String::from(&c.name));
         if c.to_compress {
@@ -532,14 +537,12 @@ fn create_insert_trigger(
     Ok(())
 }
 
-
 fn create_delete_trigger(
-        db: &rusqlite::Connection,
-        table_name: &str,
-        internal_table_name: &str,
-        primary_key_condition: &str
-    ) -> anyhow::Result<()> {
-
+    db: &rusqlite::Connection,
+    table_name: &str,
+    internal_table_name: &str,
+    primary_key_condition: &str,
+) -> anyhow::Result<()> {
     let trigger_name = format!("{}_delete_trigger", table_name);
 
     let deletetrigger_query = format!(
@@ -564,20 +567,18 @@ fn create_delete_trigger(
 
 fn create_update_triggers(
     db: &rusqlite::Connection,
-    columns_info: &Vec<ColumnInfo>,
+    columns_info: &[ColumnInfo],
     table_name: &str,
     internal_table_name: &str,
     primary_key_condition: &str,
-    config: &TransparentCompressConfig) -> anyhow::Result<()> {
+    config: &TransparentCompressConfig,
+) -> anyhow::Result<()> {
     for col in columns_info {
         if col.is_dict_id {
-            continue
+            continue;
         }
 
-        let trigger_name = format!(
-                "{}_update_{}_trigger",
-                table_name, col.name
-            );
+        let trigger_name = format!("{}_update_{}_trigger", table_name, col.name);
 
         let update = if col.to_compress {
             format!(
@@ -614,9 +615,7 @@ fn create_update_triggers(
     Ok(())
 }
 
-fn get_configs(
-        db: &rusqlite::Connection
-    ) -> Result<Vec<TransparentCompressConfig>, anyhow::Error> {
+fn get_configs(db: &rusqlite::Connection) -> Result<Vec<TransparentCompressConfig>, anyhow::Error> {
     let table_count: u32 = db
         .query_row(
             "select count(`type`) 
@@ -625,7 +624,7 @@ fn get_configs(
             params![],
             |r| r.get(0),
         )
-        .with_context(|| format!("Could not get table information for _zstd_configs"))?;
+        .with_context(|| "Could not get table information for _zstd_configs".to_string())?;
     if table_count == 0 {
         return Ok(vec![]);
     }
@@ -1047,7 +1046,7 @@ mod tests {
         .context("Could not get random id")
     }
 
-    fn insert(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
+    fn insert(db: &Connection, _id: i64, _id2: i64) -> anyhow::Result<()> {
         let query = r#"insert into events (timestamp, data) values ('2020-12-20T00:00:00Z', '{"foo": "bar"}')"#;
 
         db.execute(query, params![])?;
@@ -1055,7 +1054,7 @@ mod tests {
         Ok(())
     }
 
-    fn insert_both_columns(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
+    fn insert_both_columns(db: &Connection, _id: i64, _id2: i64) -> anyhow::Result<()> {
         let query = r#"insert into events (timestamp, data, another_col) values ('2020-12-20T00:00:00Z', '{"foo": "bar"}', 'rustacean')"#;
 
         db.execute(query, params![])?;
@@ -1063,15 +1062,15 @@ mod tests {
         Ok(())
     }
 
-    fn update_comp_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db.execute("update events set data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id]).context("updating compressed column")?;
+    fn update_comp_col(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
+        let _updc = db.execute("update events set data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id]).context("updating compressed column")?;
 
         //assert_eq!(updc, 1);
         Ok(())
     }
 
-    fn update_other_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db
+    fn update_other_col(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
+        let _updc = db
             .execute(
                 "update events set timestamp = '2020-02-01' where id = ?",
                 params![id],
@@ -1084,7 +1083,7 @@ mod tests {
     fn update_other_two_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
         delete_one(db, id2, id)?;
-        let updc = db
+        let _updc = db
             .execute(
                 "update events set timestamp = '2020-02-01', id=? where id = ?",
                 params![id2, id],
@@ -1097,21 +1096,21 @@ mod tests {
     fn update_comp_col_and_other_two_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
         delete_one(db, id2, id)?;
-        let updc = db.execute("update events set timestamp = '2020-02-01', id=?, data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id2,id]).context("updating three column")?;
+        let _updc = db.execute("update events set timestamp = '2020-02-01', id=?, data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id2,id]).context("updating three column")?;
         //assert_eq!(updc, 1);
         Ok(())
     }
 
     fn update_two_rows(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
-        let updc = db.execute("update events set timestamp = '2020-02-01', data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id in (:a, :b)", 
+        let _updc = db.execute("update events set timestamp = '2020-02-01', data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id in (:a, :b)", 
         named_params! {":a": id, ":b": id2}).context("updating two rows")?;
         //assert_eq!(updc, 2);
         Ok(())
     }
 
     fn update_two_rows_by_compressed(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db
+        let _updc = db
             .execute(
                 "update events set data = 'testingxy' where id in (?, ?)",
                 params![id, id2],
@@ -1119,7 +1118,7 @@ mod tests {
             .context("updating two rows replace compressed")?;
         //assert_eq!(updc, 2);
         //thread::rand
-        let updc = db
+        let _updc = db
             .execute(
                 "update events set timestamp='1234' where data = 'testingxy'",
                 params![],
@@ -1129,21 +1128,21 @@ mod tests {
         Ok(())
     }
 
-    fn delete_one(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db
+    fn delete_one(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
+        let _updc = db
             .execute("delete from events where id = ?", params![id])
             .context("deleting from events by id")?;
         //assert_eq!(updc, 1);
         Ok(())
     }
 
-    fn delete_where_other(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
+    fn delete_where_other(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
         let ts: String = db.query_row(
             "select timestamp from events where id = ?",
             params![id],
             |r| r.get(0),
         )?;
-        let updc = db
+        let _updc = db
             .execute("delete from events where timestamp = ?", params![ts])
             .context("deleting by timestamp")?;
         //assert_eq!(updc, 1);
@@ -1165,13 +1164,14 @@ mod tests {
         ];
 
         let mut posses2 = vec![];
-        for i in 0..100 {
+        for _ in 0..100 {
             posses2.push(*posses.choose(&mut rand::thread_rng()).unwrap());
         }
         for compress_first in vec![false, true] {
             for operations in &[&posses2] {
                 if compress_first {
-                    let (db1, db2) = get_two_dbs(Some(123)).context("Could not create databases")?;
+                    let (db1, db2) =
+                        get_two_dbs(Some(123)).context("Could not create databases")?;
                     if compress_first {
                         let done: i64 = db2.query_row(
                             "select zstd_incremental_maintenance(9999999, 1)",
@@ -1210,7 +1210,6 @@ mod tests {
 
     #[test]
     fn columns_of_the_same_table_are_enabled() -> anyhow::Result<()> {
-        
         let (db1, db2) = get_two_dbs(Some(456)).context("Could not create databases")?;
         db2.query_row(
             r#"select zstd_enable_transparent(?)"#,
@@ -1237,13 +1236,10 @@ mod tests {
 
         let id = get_rand_id(&db1)?;
         let id2 = get_rand_id(&db2)?;
-        insert_both_columns(&db1, id, id2)
-            .context("Could not run operation on uncompressed db")?;
-        insert_both_columns(&db2, id, id2)
-            .context("Could not run operation on compressed db")?;
-        
+        insert_both_columns(&db1, id, id2).context("Could not run operation on uncompressed db")?;
+        insert_both_columns(&db2, id, id2).context("Could not run operation on compressed db")?;
 
-        check_table_rows_same(&db1, &db2)?;       
+        check_table_rows_same(&db1, &db2)?;
 
         Ok(())
     }
@@ -1251,26 +1247,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "another_col (another_col_idx) - used as part of index")]
     fn indexed_column_cannot_be_enabled() {
-        
         let db = create_example_db(None, 1100).unwrap();
 
         // When column of original table is indexed
         db.execute(
             "create index another_col_idx on events (another_col)",
-            params![]
-        ).unwrap();
+            params![],
+        )
+        .unwrap();
 
         db.query_row(
             r#"select zstd_enable_transparent(?)"#,
             params![r#"{"table": "events", "column": "another_col", "compression_level": 3, "dict_chooser": "'1'"}"#],
             |_| Ok(())
-        ).unwrap();       
+        ).unwrap();
     }
 
     #[test]
     #[should_panic(expected = "another_col is already enabled for compression")]
     fn same_column_is_not_allowed_to_be_enabled_multiple_times() {
-        
         let db = create_example_db(None, 1100).unwrap();
 
         db.query_row(
@@ -1283,6 +1278,6 @@ mod tests {
             r#"select zstd_enable_transparent(?)"#,
             params![r#"{"table": "events", "column": "another_col", "compression_level": 3, "dict_chooser": "'1'"}"#],
             |_| Ok(())
-        ).unwrap();       
+        ).unwrap();
     }
 }
