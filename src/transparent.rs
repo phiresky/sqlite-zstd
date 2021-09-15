@@ -8,6 +8,8 @@ use rusqlite::{named_params, params};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+// the output will be without magic header, without checksums, and without dictids. This will save 4 bytes when not using dictionaries and 8 bytes when using dictionaries.
+// this also means the data will not be decodeable as a normal zstd archive with the standard tools
 static COMPACT: bool = true;
 #[derive(Debug)]
 struct ColumnInfo {
@@ -36,6 +38,8 @@ fn def_incremental_compression_step_bytes() -> i64 {
 /// This is the configuration of the transparent compression for one column of one table.
 /// It is safe to change every property of this configuration at any time except for table and column, but data that is already compressed will not be recompressed with the new settings.
 /// You can update the config e.g. using SQL: `update _zstd_configs set config = json_patch(config, '{"target_db_load": 1}');`
+///
+/// Note that the configuration is assumed to be trusted. For example, dict_chooser can probably used for SQL injection.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransparentCompressConfig {
     /// the name of the table to which the transparent compression will be applied. It will be renamed to _tblname_zstd and replaced with a editable view.
@@ -251,7 +255,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     }
     if primary_key_columns.is_empty() {
         anyhow::bail!(
-            "Table {} does not have a primary key, sqlite-zstd only works on tables with primary keys.",
+            "Table {} does not have a primary key, sqlite-zstd only works on tables with primary keys, since rowids can change on VACUUM.",
             table_name
         );
     }
@@ -321,6 +325,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         )
         .context("Could not add dictid column")?;
 
+        // this index is needed since the maintenance function queries by the dictionary id to find rows that are not compressed
         db.execute(
             &format_sqlite!(
                 "create index {} on {} ({})",
@@ -432,6 +437,7 @@ fn create_or_replace_view(
     table_already_enabled: bool,
 ) -> anyhow::Result<()> {
     if table_already_enabled {
+        // this drops the existing triggers as well
         let dropview_query = format!(r#"drop view {}"#, escape_sqlite_identifier(&table_name));
         log::debug!("[run] {}", &dropview_query);
         db.execute(&dropview_query, params![])
@@ -489,8 +495,9 @@ fn create_insert_trigger(
 ) -> anyhow::Result<()> {
     let trigger_name = format!("{}_insert_trigger", table_name);
 
-    // insert trigger
+    // expressions that map backing table columns to view columns
     let mut insert_selection = vec![];
+    // names of the columns to be inserted
     let mut columns_selection = vec![];
 
     for c in columns_info {
@@ -616,6 +623,7 @@ fn create_update_triggers(
 }
 
 fn get_configs(db: &rusqlite::Connection) -> Result<Vec<TransparentCompressConfig>, anyhow::Error> {
+    // if the table `_zstd_configs` does not exist yet, transparent compression hasn't been used yet, so return an empty array
     let table_count: u32 = db
         .query_row(
             "select count(`type`) 
