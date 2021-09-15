@@ -60,7 +60,6 @@ pub mod tests {
     use chrono::TimeZone;
     pub use pretty_assertions::{assert_eq, assert_ne};
 
-    use rand::thread_rng;
     use rusqlite::{params, Connection};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
@@ -85,11 +84,11 @@ pub mod tests {
         let seed = seed.unwrap_or(thread_rng().gen());
         lazy_static::lazy_static! {
             // people use maybe 100 different apps
-            static ref app_names: Vec<String> = names::Generator::with_naming(names::Name::Plain)
+            static ref APP_NAMES: Vec<String> = names::Generator::with_naming(names::Name::Plain)
             .take(100)
             .collect();
             // of maybe 10 different categories
-            static ref app_types: Vec<String> = names::Generator::with_naming(names::Name::Plain)
+            static ref APP_TYPES: Vec<String> = names::Generator::with_naming(names::Name::Plain)
                 .take(10)
                 .collect();
         };
@@ -109,7 +108,8 @@ pub mod tests {
             create table events (
                 id integer primary key not null,
                 timestamp text not null,
-                data text not null
+                data text not null,
+                another_col text
             );
         ",
         )?;
@@ -160,8 +160,8 @@ pub mod tests {
                 }
                 EventData::OpenApplication {
                     id: app_id_dist.sample(&mut rng),
-                    app_name: app_names.choose(&mut rng).unwrap().clone(),
-                    app_type: app_types.choose(&mut rng).unwrap().clone(),
+                    app_name: APP_NAMES.choose(&mut rng).unwrap().clone(),
+                    app_type: APP_TYPES.choose(&mut rng).unwrap().clone(),
                     properties,
                 }
             }
@@ -174,13 +174,15 @@ pub mod tests {
         {
             let tx = db.transaction()?;
             {
-                let mut insert =
-                    tx.prepare("insert into events (timestamp, data) values (?, ?)")?;
+                let mut insert = tx.prepare(
+                    "insert into events (timestamp, data, another_col) values (?, ?, ?)",
+                )?;
                 let date = chrono::Utc.ymd(2021, 1, 1).and_hms(0, 0, 0);
                 for (i, d) in data.enumerate() {
                     insert.execute(params![
                         (date + chrono::Duration::seconds(30) * (i as i32)).to_rfc3339(),
-                        serde_json::to_string_pretty(&d)?
+                        serde_json::to_string_pretty(&d)?,
+                        "rustacean"
                     ])?;
                 }
             }

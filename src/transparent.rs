@@ -5,6 +5,7 @@ use rusqlite::types::ToSqlOutput;
 use rusqlite::types::Value;
 use rusqlite::OptionalExtension;
 use rusqlite::{named_params, params};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 static COMPACT: bool = true;
@@ -13,6 +14,8 @@ struct ColumnInfo {
     name: String,
     coltype: String,
     is_primary_key: bool,
+    to_compress: bool,
+    is_dict_id: bool,
 }
 
 fn def_min_dict_size() -> i64 {
@@ -144,10 +147,9 @@ fn show_warnings(db: &Connection) -> anyhow::Result<()> {
 ///
 /// enables transparent row-level compression for a table with the following steps:
 ///
-/// 1. renames tablename to _tablename_zstd
-/// 2. trains a zstd dictionary on the column by sampling the existing data in the table
-/// 3. creates a view called tablename that mirrors _tablename_zstd except it decompresses the compressed column on the fly
-/// 4. creates INSERT, UPDATE and DELETE triggers on the view so they affect the backing table instead
+/// 1. renames tablename to _tablename_zstd if table is not already enabled
+/// 2. creates a view called tablename that mirrors _tablename_zstd except it decompresses the compressed column on the fly
+/// 3. creates INSERT, UPDATE and DELETE triggers on the view so they affect the backing table instead
 ///
 /// Warning: this function assumes trusted input, it is not sql injection safe!
 pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<'a>> {
@@ -163,23 +165,76 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     let table_name = &config.table;
     let new_table_name = format!("_{}_zstd", table_name);
 
-    let table_type: String = db
-        .query_row(
-            "select `type` from sqlite_master where name=?",
-            params![table_name],
-            |r| r.get(0),
-        )
-        .with_context(|| format!("Could not get table information for {}", table_name))?;
-    if table_type != "table" {
-        anyhow::bail!("{} is a {} not a table", table_name, table_type);
+    let configs = get_configs(&db)?;
+    let already_compressed_columns = configs
+        .iter()
+        .filter(|c| &c.table == table_name)
+        .map(|c| &c.column[..])
+        .collect::<Vec<&str>>();
+
+    log::debug!(
+        "already compressed columns={:?}",
+        already_compressed_columns
+    );
+
+    if already_compressed_columns.contains(&&config.column[..]) {
+        anyhow::bail!(
+            "Column {} is already enabled for compression.",
+            &config.column
+        );
     }
+
+    let table_already_enabled = !already_compressed_columns.is_empty();
+
+    let dict_id_columns: Vec<String> = if table_already_enabled {
+        let query = format!(
+            r#"select "from"
+            from pragma_foreign_key_list('{}')
+            where "table" = '_zstd_dicts'"#,
+            &new_table_name
+        );
+        log::debug!("dict_id_columns query {:?}", query);
+        db.prepare(&query)?
+            .query_map(params![], |row| Ok(row.get("from")?))
+            .context("Could not get dicts ids info")?
+            .collect::<Result<Vec<String>, _>>()?
+    } else {
+        vec![]
+    };
+
+    log::debug!("dict_id columns={:?}", dict_id_columns);
+
+    if !check_table_exists(
+        &db,
+        if table_already_enabled {
+            &new_table_name
+        } else {
+            table_name
+        },
+    ) {
+        anyhow::bail!("Table {} doesn't exist", table_name);
+    }
+
     let columns_info: Vec<ColumnInfo> = db
-        .prepare(&format_sqlite!(r#"pragma table_info({})"#, &table_name))?
+        .prepare(&format_sqlite!(
+            r#"pragma table_info({})"#,
+            if table_already_enabled {
+                &new_table_name
+            } else {
+                &table_name
+            }
+        ))?
         .query_map(params![], |row| {
+            let col_name: String = row.get("name")?;
+            let to_compress = (col_name == config.column)
+                || (already_compressed_columns.contains(&&col_name[..]));
+            let is_dict_id = dict_id_columns.contains(&col_name);
             Ok(ColumnInfo {
-                name: row.get("name")?,
+                name: col_name,
                 is_primary_key: row.get("pk")?,
                 coltype: row.get("type")?,
+                to_compress,
+                is_dict_id,
             })
         })
         .context("Could not query table_info")?
@@ -211,12 +266,9 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         anyhow::bail!("Can't compress column {} since it is part of primary key (this could probably be supported, but currently isn't)", column_name);
     }
 
-    let affinity_is_text = match get_column_affinity(&to_compress_column.coltype) {
-        SqliteAffinity::Blob => false,
-        SqliteAffinity::Text => true,
-        other => anyhow::bail!("the to-compress column has type {} which has affinity {:?}, but affinity must be text or blob. See https://www.sqlite.org/draft/datatype3.html#determination_of_column_affinity", to_compress_column.coltype, other)
-    };
-    let dict_id_column_name = format!("_{}_dict", to_compress_column.name);
+    check_columns_to_compress_are_not_indexed(&db, &columns_info, table_name)?;
+
+    let dict_id_column_name = get_dict_id(&to_compress_column.name);
     log::debug!("cols={:?}", columns_info);
 
     {
@@ -233,11 +285,13 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     }
     {
         // can't use prepared statement at these positions
-        let rename_query =
-            format_sqlite!("alter table {} rename to {}", &table_name, &new_table_name);
-        log::debug!("[run] {}", &rename_query);
-        db.execute(&rename_query, params![])
-            .context("Could not rename table")?;
+        if !table_already_enabled {
+            let rename_query =
+                format_sqlite!("alter table {} rename to {}", &table_name, &new_table_name);
+            log::debug!("[run] {}", &rename_query);
+            db.execute(&rename_query, params![])
+                .context("Could not rename table")?;
+        }
 
         util::ensure_dicts_table_exists(&db)?;
 
@@ -279,147 +333,312 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         .context("Could not create index on dictid")?;
     }
 
-    {
-        // create view
-        let select_columns_escaped = columns_info
-            .iter()
-            .map(|c| {
-                if column_name == &c.name {
-                    format!(
-                        // prepared statement parameters not allowed in view
-                        "zstd_decompress_col({}, {}, {}, {}) as {0}",
-                        &escape_sqlite_identifier(&column_name),
-                        if affinity_is_text { 1 } else { 0 },
-                        &escape_sqlite_identifier(&dict_id_column_name),
-                        COMPACT
-                    )
-                } else {
-                    format_sqlite!("{}", &c.name)
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(", ");
-        let createview_query = format!(
-            r#"
-            create view {} as
-                select {}
-                from {}
-            "#,
-            escape_sqlite_identifier(&table_name),
-            select_columns_escaped,
-            escape_sqlite_identifier(&new_table_name)
-        );
-        log::debug!("[run] {}", &createview_query);
-        db.execute(&createview_query, params![])
-            .context("Could not create view")?;
-    }
+    create_or_replace_view(
+        &db,
+        &columns_info,
+        table_name,
+        &new_table_name,
+        table_already_enabled,
+    )?;
 
-    {
-        // insert trigger
-        let insert_selection = columns_info
-            .iter()
-            .map(|c| {
-                if column_name == &c.name {
-                    format!(
-                        // prepared statement parameters not allowed in view
-                        "zstd_compress_col(new.{col}, {lvl}, (select id from _zstd_dicts where chooser_key=({chooser})), {compact}) as {col},
-                        (select id from _zstd_dicts where chooser_key=({chooser})) as {dictcol}",
-                        col=escape_sqlite_identifier(&column_name),
-                        lvl=config.compression_level,
-                        chooser=config.dict_chooser,
-                        dictcol=escape_sqlite_identifier(&dict_id_column_name),
-                        compact=COMPACT
-                    )
-                } else {
-                    format_sqlite!("new.{}", &c.name)
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(",\n");
-        let createtrigger_query = format!(
-            "
-            create trigger {}
-                instead of insert on {}
-                for each row
-                begin
-                    insert into {} select {};
-                end;
-            ",
-            escape_sqlite_identifier(&format!("{}_insert_trigger", table_name)),
-            escape_sqlite_identifier(&table_name),
-            escape_sqlite_identifier(&new_table_name),
-            insert_selection
-        );
-        log::debug!("[run] {}", &createtrigger_query);
-        db.execute(&createtrigger_query, params![])
-            .context("Could not create insert trigger")?;
-    }
+    create_insert_trigger(&db, &columns_info, table_name, &new_table_name, &config)?;
+
     // a WHERE statement that selects a row based on the primary key
     let primary_key_condition = primary_key_columns
         .iter()
         .map(|c| format_sqlite!("old.{0} = {0}", &c.name))
         .collect::<Vec<String>>()
         .join(" and ");
-    {
-        // add delete trigger
-        let deletetrigger_query = format!(
-            "
-            create trigger {trg_name}
-                instead of delete on {view}
-                for each row
-                begin
-                    delete from {backing_table} where {primary_key_condition};
-                end;
-            ",
-            trg_name = escape_sqlite_identifier(&format!("{}_delete_trigger", table_name)),
-            view = escape_sqlite_identifier(&table_name),
-            backing_table = escape_sqlite_identifier(&new_table_name),
-            primary_key_condition = primary_key_condition
-        );
-        log::debug!("[run] {}", &deletetrigger_query);
-        db.execute(&deletetrigger_query, params![])
-            .context("could not create delete trigger")?;
-    }
-    {
-        for col in &columns_info {
-            let update = if col.name == to_compress_column.name {
-                format!(
-                    "{col} = zstd_compress_col(new.{col}, {lvl}, {dictcol}, {compact})",
-                    col = escape_sqlite_identifier(&col.name),
-                    lvl = config.compression_level,
-                    dictcol = escape_sqlite_identifier(&dict_id_column_name),
-                    compact = COMPACT
-                )
-            } else {
-                format_sqlite!("{} = new.{}", &col.name, &col.name)
-            };
-            // update triggers
-            let updatetrigger_query = format!(
-                "
-                create trigger {trg_name}
-                    instead of update of {upd_col} on {view_name}
-                    for each row
-                    begin
-                        update {backing_table} set {update} where {primary_key_condition};
-                    end;
-                ",
-                trg_name = escape_sqlite_identifier(&format!(
-                    "{}_update_{}_trigger",
-                    table_name, col.name
-                )),
-                view_name = escape_sqlite_identifier(&table_name),
-                backing_table = escape_sqlite_identifier(&new_table_name),
-                upd_col = escape_sqlite_identifier(&col.name),
-                update = update,
-                primary_key_condition = primary_key_condition
-            );
-            log::debug!("[run] {}", &updatetrigger_query);
-            db.execute(&updatetrigger_query, params![])
-                .with_context(|| format!("Could not create update of {} trigger", col.name))?;
-        }
-    }
+
+    // add delete trigger
+    create_delete_trigger(&db, table_name, &new_table_name, &primary_key_condition)?;
+
+    // update trigger
+    create_update_triggers(
+        &db,
+        &columns_info,
+        table_name,
+        &new_table_name,
+        &primary_key_condition,
+        &config,
+    )?;
+
     db.commit().context("Could not commit transaction")?;
     Ok(ToSqlOutput::Owned(Value::Text("Done!".to_string())))
+}
+
+fn get_dict_id(column_name: &str) -> String {
+    format!("_{}_dict", column_name)
+}
+
+fn check_table_exists(db: &rusqlite::Connection, table_name: &str) -> bool {
+    let table_count: u32 = db
+        .query_row(
+            "select count(`type`) from sqlite_master where name = ? and type = 'table'",
+            params![table_name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if table_count == 0 {
+        return false;
+    }
+    true
+}
+
+fn check_columns_to_compress_are_not_indexed(
+    db: &rusqlite::Connection,
+    columns_info: &[ColumnInfo],
+    table_name: &str,
+) -> anyhow::Result<()> {
+    let indexed_columns: HashMap<String, String> = db
+        .prepare(
+            "
+            select distinct ii.name as column_name, il.name as index_name
+            from sqlite_master as m,
+            pragma_index_list(m.name) as il,
+            pragma_index_info(il.name) as ii
+            where m.type='table' AND m.name=?",
+        )?
+        .query_map(params![table_name], |row| {
+            Ok((row.get("column_name")?, row.get("index_name")?))
+        })
+        .context("could not get indices info")?
+        .collect::<Result<_, rusqlite::Error>>()?;
+
+    let indexed_columns_to_compress = columns_info
+        .iter()
+        .filter(|c| match indexed_columns.get(&c.name) {
+            Some(_) => c.to_compress,
+            None => false,
+        })
+        .collect::<Vec<&ColumnInfo>>();
+
+    if !indexed_columns_to_compress.is_empty() {
+        let columns_indices = indexed_columns_to_compress
+            .iter()
+            .map(|c| format!("{} ({})", c.name, indexed_columns.get(&c.name).unwrap()))
+            .collect::<Vec<String>>()
+            .join(", ");
+        anyhow::bail!("Can't compress column(s): {} - used as part of index (this could probably be supported, but currently isn't)", columns_indices);
+    };
+    Ok(())
+}
+
+fn create_or_replace_view(
+    db: &rusqlite::Connection,
+    columns_info: &[ColumnInfo],
+    table_name: &str,
+    internal_table_name: &str,
+    table_already_enabled: bool,
+) -> anyhow::Result<()> {
+    if table_already_enabled {
+        let dropview_query = format!(r#"drop view {}"#, escape_sqlite_identifier(&table_name));
+        log::debug!("[run] {}", &dropview_query);
+        db.execute(&dropview_query, params![])
+            .context("Could not drop view")?;
+    }
+
+    // create view
+    let select_columns_escaped = columns_info
+        .iter()
+        .filter(|c| !c.is_dict_id )
+        .map(|c| {
+            if c.to_compress {
+                let affinity_is_text = match get_column_affinity(&c.coltype) {
+                    SqliteAffinity::Blob => false,
+                    SqliteAffinity::Text => true,
+                    other => anyhow::bail!("the to-compress column has type {} which has affinity {:?}, but affinity must be text or blob. See https://www.sqlite.org/draft/datatype3.html#determination_of_column_affinity", c.coltype, other)
+                };
+                Ok(format!(
+                    // prepared statement parameters not allowed in view
+                    "zstd_decompress_col({}, {}, {}, {}) as {0}",
+                    &escape_sqlite_identifier(&c.name),
+                    if affinity_is_text { 1 } else { 0 },
+                    &escape_sqlite_identifier(&get_dict_id(&c.name)),
+                    COMPACT
+                ))
+            } else {
+                Ok(format_sqlite!("{}", &c.name))
+            }
+        })
+        .collect::<Result<Vec<String>, _>>()
+        .context("could not construct select in view")?
+        .join(", ");
+    let createview_query = format!(
+        r#"
+        create view {} as
+            select {}
+            from {}
+        "#,
+        escape_sqlite_identifier(&table_name),
+        select_columns_escaped,
+        escape_sqlite_identifier(&internal_table_name)
+    );
+    log::debug!("[run] {}", &createview_query);
+    db.execute(&createview_query, params![])
+        .context("Could not create view")?;
+    Ok(())
+}
+
+fn create_insert_trigger(
+    db: &rusqlite::Connection,
+    columns_info: &[ColumnInfo],
+    table_name: &str,
+    internal_table_name: &str,
+    config: &TransparentCompressConfig,
+) -> anyhow::Result<()> {
+    let trigger_name = format!("{}_insert_trigger", table_name);
+
+    // insert trigger
+    let mut insert_selection = vec![];
+    let mut columns_selection = vec![];
+
+    for c in columns_info {
+        if c.is_dict_id {
+            continue;
+        }
+        columns_selection.push(String::from(&c.name));
+        if c.to_compress {
+            let dict_id = get_dict_id(&c.name);
+            insert_selection.push(format!(
+                // prepared statement parameters not allowed in view
+                "zstd_compress_col(new.{col}, {lvl}, (select id from _zstd_dicts where chooser_key=({chooser})), {compact}) as {col},
+                (select id from _zstd_dicts where chooser_key=({chooser})) as {dictcol}",
+                col=escape_sqlite_identifier(&c.name),
+                lvl=config.compression_level,
+                chooser=config.dict_chooser,
+                dictcol=escape_sqlite_identifier(&dict_id),
+                compact=COMPACT
+            ));
+            columns_selection.push(String::from(&dict_id));
+        } else {
+            insert_selection.push(format_sqlite!("new.{}", &c.name));
+        }
+    }
+
+    let createtrigger_query = format!(
+        "
+        create trigger {}
+            instead of insert on {}
+            for each row
+            begin
+                insert into {}({}) select {};
+            end;
+        ",
+        escape_sqlite_identifier(&trigger_name),
+        escape_sqlite_identifier(&table_name),
+        escape_sqlite_identifier(&internal_table_name),
+        columns_selection.join(", "),
+        insert_selection.join(",\n"),
+    );
+    log::debug!("[run] {}", &createtrigger_query);
+    db.execute(&createtrigger_query, params![])
+        .context("Could not create insert trigger")?;
+    Ok(())
+}
+
+fn create_delete_trigger(
+    db: &rusqlite::Connection,
+    table_name: &str,
+    internal_table_name: &str,
+    primary_key_condition: &str,
+) -> anyhow::Result<()> {
+    let trigger_name = format!("{}_delete_trigger", table_name);
+
+    let deletetrigger_query = format!(
+        "
+        create trigger {trg_name}
+            instead of delete on {view}
+            for each row
+            begin
+                delete from {backing_table} where {primary_key_condition};
+            end;
+        ",
+        trg_name = escape_sqlite_identifier(&trigger_name),
+        view = escape_sqlite_identifier(&table_name),
+        backing_table = escape_sqlite_identifier(&internal_table_name),
+        primary_key_condition = primary_key_condition
+    );
+    log::debug!("[run] {}", &deletetrigger_query);
+    db.execute(&deletetrigger_query, params![])
+        .context("could not create delete trigger")?;
+    Ok(())
+}
+
+fn create_update_triggers(
+    db: &rusqlite::Connection,
+    columns_info: &[ColumnInfo],
+    table_name: &str,
+    internal_table_name: &str,
+    primary_key_condition: &str,
+    config: &TransparentCompressConfig,
+) -> anyhow::Result<()> {
+    for col in columns_info {
+        if col.is_dict_id {
+            continue;
+        }
+
+        let trigger_name = format!("{}_update_{}_trigger", table_name, col.name);
+
+        let update = if col.to_compress {
+            format!(
+                "{col} = zstd_compress_col(new.{col}, {lvl}, {dictcol}, {compact})",
+                col = escape_sqlite_identifier(&col.name),
+                lvl = config.compression_level,
+                dictcol = escape_sqlite_identifier(&get_dict_id(&col.name)),
+                compact = COMPACT
+            )
+        } else {
+            format_sqlite!("{} = new.{}", &col.name, &col.name)
+        };
+        // update triggers
+        let updatetrigger_query = format!(
+            "
+            create trigger {trg_name}
+                instead of update of {upd_col} on {view_name}
+                for each row
+                begin
+                    update {backing_table} set {update} where {primary_key_condition};
+                end;
+            ",
+            trg_name = escape_sqlite_identifier(&trigger_name),
+            view_name = escape_sqlite_identifier(&table_name),
+            backing_table = escape_sqlite_identifier(&internal_table_name),
+            upd_col = escape_sqlite_identifier(&col.name),
+            update = update,
+            primary_key_condition = primary_key_condition
+        );
+        log::debug!("[run] {}", &updatetrigger_query);
+        db.execute(&updatetrigger_query, params![])
+            .with_context(|| format!("Could not create update of {} trigger", col.name))?;
+    }
+    Ok(())
+}
+
+fn get_configs(db: &rusqlite::Connection) -> Result<Vec<TransparentCompressConfig>, anyhow::Error> {
+    let table_count: u32 = db
+        .query_row(
+            "select count(`type`) 
+            from sqlite_master 
+            where name = '_zstd_configs' and type = 'table'",
+            params![],
+            |r| r.get(0),
+        )
+        .with_context(|| "Could not get table information for _zstd_configs".to_string())?;
+    if table_count == 0 {
+        return Ok(vec![]);
+    }
+
+    let configs = db
+        .prepare("select config from _zstd_configs")?
+        .query_map(params![], |row| {
+            serde_json::from_str(row.get_ref_unwrap("config").as_str()?)
+                .context("parsing config")
+                .map_err(ah)
+        })
+        .context("Couldn't fetch configs")?
+        .collect::<Result<Vec<TransparentCompressConfig>, rusqlite::Error>>()?;
+    Ok(configs)
 }
 
 #[derive(Debug)]
@@ -456,14 +675,8 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
     };
     let db = unsafe { ctx.get_connection()? };
     show_warnings(&db)?;
-    let configs = db
-        .prepare("select config from _zstd_configs")?
-        .query_map(params![], |row| {
-            serde_json::from_str(row.get_ref_unwrap("config").as_str()?)
-                .context("parsing config")
-                .map_err(ah)
-        })?
-        .collect::<Result<Vec<TransparentCompressConfig>, _>>()?;
+    let configs = get_configs(&db)?;
+
     for config in configs {
         match maintenance_for_config(&db, config, &args)? {
             MaintRet::TimeLimitReached => {
@@ -774,7 +987,7 @@ mod tests {
     }
 
     fn get_whole_table(db: &Connection, tbl_name: &str) -> anyhow::Result<Vec<Vec<Value>>> {
-        let mut stmt = db.prepare(&format!("select * from {}", tbl_name))?;
+        let mut stmt = db.prepare(&format!("select * from {} ORDER BY id", tbl_name))?;
         let q1: Vec<Vec<Value>> = stmt
             .query_map(params![], |e| row_to_thong(e).map_err(ah))?
             .collect::<Result<_, rusqlite::Error>>()?;
@@ -799,14 +1012,14 @@ mod tests {
         Ok(())
     }
 
-    fn get_two_dbs() -> anyhow::Result<(Connection, Connection)> {
+    fn get_two_dbs(seed: Option<u64>) -> anyhow::Result<(Connection, Connection)> {
         if std::env::var("RUST_LOG").is_err() {
             std::env::set_var("RUST_LOG", "info");
         }
         env_logger::try_init().ok();
 
-        let db1 = create_example_db(Some(123), 2000)?;
-        let db2 = create_example_db(Some(123), 2000)?;
+        let db1 = create_example_db(seed, 2000)?;
+        let db2 = create_example_db(seed, 2000)?;
 
         db2.query_row(
             r#"select zstd_enable_transparent(?)"#,
@@ -818,7 +1031,7 @@ mod tests {
     }
     #[test]
     fn enable_transparent() -> anyhow::Result<()> {
-        let (db1, db2) = get_two_dbs()?;
+        let (db1, db2) = get_two_dbs(Some(123))?;
         check_table_rows_same(&db1, &db2)?;
 
         Ok(())
@@ -833,7 +1046,7 @@ mod tests {
         .context("Could not get random id")
     }
 
-    fn insert(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
+    fn insert(db: &Connection, _id: i64, _id2: i64) -> anyhow::Result<()> {
         let query = r#"insert into events (timestamp, data) values ('2020-12-20T00:00:00Z', '{"foo": "bar"}')"#;
 
         db.execute(query, params![])?;
@@ -841,15 +1054,23 @@ mod tests {
         Ok(())
     }
 
-    fn update_comp_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db.execute("update events set data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id]).context("updating compressed column")?;
+    fn insert_both_columns(db: &Connection, _id: i64, _id2: i64) -> anyhow::Result<()> {
+        let query = r#"insert into events (timestamp, data, another_col) values ('2020-12-20T00:00:00Z', '{"foo": "bar"}', 'rustacean')"#;
+
+        db.execute(query, params![])?;
+
+        Ok(())
+    }
+
+    fn update_comp_col(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
+        let _updc = db.execute("update events set data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id]).context("updating compressed column")?;
 
         //assert_eq!(updc, 1);
         Ok(())
     }
 
-    fn update_other_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db
+    fn update_other_col(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
+        let _updc = db
             .execute(
                 "update events set timestamp = '2020-02-01' where id = ?",
                 params![id],
@@ -862,7 +1083,7 @@ mod tests {
     fn update_other_two_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
         delete_one(db, id2, id)?;
-        let updc = db
+        let _updc = db
             .execute(
                 "update events set timestamp = '2020-02-01', id=? where id = ?",
                 params![id2, id],
@@ -875,21 +1096,21 @@ mod tests {
     fn update_comp_col_and_other_two_col(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
         delete_one(db, id2, id)?;
-        let updc = db.execute("update events set timestamp = '2020-02-01', id=?, data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id2,id]).context("updating three column")?;
+        let _updc = db.execute("update events set timestamp = '2020-02-01', id=?, data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id = ?", params![id2,id]).context("updating three column")?;
         //assert_eq!(updc, 1);
         Ok(())
     }
 
     fn update_two_rows(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
         //thread::rand
-        let updc = db.execute("update events set timestamp = '2020-02-01', data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id in (:a, :b)", 
+        let _updc = db.execute("update events set timestamp = '2020-02-01', data='fooooooooooooooooooooooooooooooooooooooooooooobar' where id in (:a, :b)", 
         named_params! {":a": id, ":b": id2}).context("updating two rows")?;
         //assert_eq!(updc, 2);
         Ok(())
     }
 
     fn update_two_rows_by_compressed(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db
+        let _updc = db
             .execute(
                 "update events set data = 'testingxy' where id in (?, ?)",
                 params![id, id2],
@@ -897,7 +1118,7 @@ mod tests {
             .context("updating two rows replace compressed")?;
         //assert_eq!(updc, 2);
         //thread::rand
-        let updc = db
+        let _updc = db
             .execute(
                 "update events set timestamp='1234' where data = 'testingxy'",
                 params![],
@@ -907,21 +1128,21 @@ mod tests {
         Ok(())
     }
 
-    fn delete_one(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
-        let updc = db
+    fn delete_one(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
+        let _updc = db
             .execute("delete from events where id = ?", params![id])
             .context("deleting from events by id")?;
         //assert_eq!(updc, 1);
         Ok(())
     }
 
-    fn delete_where_other(db: &Connection, id: i64, id2: i64) -> anyhow::Result<()> {
+    fn delete_where_other(db: &Connection, id: i64, _id2: i64) -> anyhow::Result<()> {
         let ts: String = db.query_row(
             "select timestamp from events where id = ?",
             params![id],
             |r| r.get(0),
         )?;
-        let updc = db
+        let _updc = db
             .execute("delete from events where timestamp = ?", params![ts])
             .context("deleting by timestamp")?;
         //assert_eq!(updc, 1);
@@ -943,20 +1164,23 @@ mod tests {
         ];
 
         let mut posses2 = vec![];
-        for i in 0..100 {
+        for _ in 0..100 {
             posses2.push(*posses.choose(&mut rand::thread_rng()).unwrap());
         }
         for compress_first in vec![false, true] {
             for operations in &[&posses2] {
                 if compress_first {
-                    let (db1, db2) = get_two_dbs().context("Could not create databases")?;
+                    let (db1, db2) =
+                        get_two_dbs(Some(123)).context("Could not create databases")?;
                     if compress_first {
                         let done: i64 = db2.query_row(
                             "select zstd_incremental_maintenance(9999999, 1)",
                             params![],
                             |r| r.get(0),
                         )?;
+
                         assert_eq!(done, 0);
+
                         let uncompressed_count: i64 = db2
                             .query_row(
                                 "select count(*) from _events_zstd where _data_dict is null",
@@ -982,5 +1206,78 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn columns_of_the_same_table_are_enabled() -> anyhow::Result<()> {
+        let (db1, db2) = get_two_dbs(Some(456)).context("Could not create databases")?;
+        db2.query_row(
+            r#"select zstd_enable_transparent(?)"#,
+            params![r#"{"table": "events", "column": "another_col", "compression_level": 3, "dict_chooser": "'1'"}"#],
+            |_| Ok(())
+        ).context("enable transparent")?;
+
+        let done: i64 = db2.query_row(
+            "select zstd_incremental_maintenance(9999999, 1)",
+            params![],
+            |r| r.get(0),
+        )?;
+
+        assert_eq!(done, 0);
+
+        let uncompressed_count: i64 = db2
+            .query_row(
+                "select count(*) from _events_zstd where _data_dict is null",
+                params![],
+                |r| r.get(0),
+            )
+            .context("Could not query uncompressed count")?;
+        assert_eq!(uncompressed_count, 0);
+
+        let id = get_rand_id(&db1)?;
+        let id2 = get_rand_id(&db2)?;
+        insert_both_columns(&db1, id, id2).context("Could not run operation on uncompressed db")?;
+        insert_both_columns(&db2, id, id2).context("Could not run operation on compressed db")?;
+
+        check_table_rows_same(&db1, &db2)?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "another_col (another_col_idx) - used as part of index")]
+    fn indexed_column_cannot_be_enabled() {
+        let db = create_example_db(None, 1100).unwrap();
+
+        // When column of original table is indexed
+        db.execute(
+            "create index another_col_idx on events (another_col)",
+            params![],
+        )
+        .unwrap();
+
+        db.query_row(
+            r#"select zstd_enable_transparent(?)"#,
+            params![r#"{"table": "events", "column": "another_col", "compression_level": 3, "dict_chooser": "'1'"}"#],
+            |_| Ok(())
+        ).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "another_col is already enabled for compression")]
+    fn same_column_is_not_allowed_to_be_enabled_multiple_times() {
+        let db = create_example_db(None, 1100).unwrap();
+
+        db.query_row(
+            r#"select zstd_enable_transparent(?)"#,
+            params![r#"{"table": "events", "column": "another_col", "compression_level": 3, "dict_chooser": "'1'"}"#],
+            |_| Ok(())
+        ).unwrap();
+
+        db.query_row(
+            r#"select zstd_enable_transparent(?)"#,
+            params![r#"{"table": "events", "column": "another_col", "compression_level": 3, "dict_chooser": "'1'"}"#],
+            |_| Ok(())
+        ).unwrap();
     }
 }
