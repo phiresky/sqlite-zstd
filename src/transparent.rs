@@ -384,10 +384,7 @@ fn check_table_exists(db: &rusqlite::Connection, table_name: &str) -> bool {
             |r| r.get(0),
         )
         .unwrap_or(0);
-    if table_count == 0 {
-        return false;
-    }
-    true
+    table_count != 0
 }
 
 fn check_columns_to_compress_are_not_indexed(
@@ -624,16 +621,7 @@ fn create_update_triggers(
 
 fn get_configs(db: &rusqlite::Connection) -> Result<Vec<TransparentCompressConfig>, anyhow::Error> {
     // if the table `_zstd_configs` does not exist yet, transparent compression hasn't been used yet, so return an empty array
-    let table_count: u32 = db
-        .query_row(
-            "select count(`type`) 
-            from sqlite_master 
-            where name = '_zstd_configs' and type = 'table'",
-            params![],
-            |r| r.get(0),
-        )
-        .with_context(|| "Could not get table information for _zstd_configs".to_string())?;
-    if table_count == 0 {
+    if !check_table_exists(&db, "_zstd_configs") {
         return Ok(vec![]);
     }
 
@@ -1017,6 +1005,14 @@ mod tests {
 
         check_table_rows_same(&db1, &db2)?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn no_configs() -> anyhow::Result<()> {
+        let db = create_example_db(Some(123), 100)?;
+
+        assert_eq!(get_configs(&db)?.len(), 0);
         Ok(())
     }
 
