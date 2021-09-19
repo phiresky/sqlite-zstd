@@ -2,7 +2,7 @@
 
 Extension for sqlite that provides transparent dictionary-based row-level compression for sqlite. This basically allows you to compress entries in a sqlite database almost as well as if you were compressing the whole DB file, but while retaining random access.
 
-Depending on the data, this can reduce the size of the database by 90% while keeping performance mostly the same.
+Depending on the data, this can reduce the size of the database by 90% while keeping performance mostly the same (or even improving it, since the data to be read from disk is smaller).
 
 ## Transparent Compression
 
