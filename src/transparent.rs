@@ -1171,7 +1171,7 @@ mod tests {
         for _ in 0..100 {
             posses2.push(*posses.choose(&mut rand::thread_rng()).unwrap());
         }
-        for compress_first in vec![false, true] {
+        for compress_first in [false, true] {
             for operations in &[&posses2] {
                 if compress_first {
                     let (db1, db2) =

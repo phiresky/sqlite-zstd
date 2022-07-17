@@ -63,6 +63,8 @@ pub(crate) fn zstd_compress_fn<'a>(
             //Some(Arc::new(wrap_encoder_dict(d.to_vec(), level))),
             ValueRef::Integer(_) => Encoder::with_prepared_dictionary(
                 out,
+                #[allow(clippy::explicit_auto_deref)]
+                // https://github.com/rust-lang/rust-clippy/issues/9143
                 &*encoder_dict_from_ctx(ctx, arg_dict, level)
                     .context("loading dictionary from int")?,
             ),
