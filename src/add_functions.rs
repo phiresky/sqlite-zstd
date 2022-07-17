@@ -81,7 +81,7 @@ pub mod tests {
     }
 
     pub fn create_example_db(seed: Option<u64>, eles: i32) -> anyhow::Result<Connection> {
-        let seed = seed.unwrap_or(thread_rng().gen());
+        let seed = seed.unwrap_or_else(|| thread_rng().gen());
         lazy_static::lazy_static! {
             // people use maybe 100 different apps
             static ref APP_NAMES: Vec<String> = names::Generator::with_naming(names::Name::Plain)

@@ -1155,7 +1155,8 @@ mod tests {
 
     #[test]
     fn test_many() -> anyhow::Result<()> {
-        let posses: Vec<&dyn Fn(&Connection, i64, i64) -> anyhow::Result<()>> = vec![
+        type Executor = dyn Fn(&Connection, i64, i64) -> anyhow::Result<()>;
+        let posses: Vec<&Executor> = vec![
             &insert,
             &update_comp_col,
             &update_other_col,
