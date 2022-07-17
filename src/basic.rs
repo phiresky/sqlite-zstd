@@ -51,16 +51,19 @@ pub(crate) fn zstd_compress_fn<'a>(
     } else {
         ctx.get(arg_is_compact).context("is_compact argument")?
     };
+    let out = Vec::new();
+    use zstd::stream::write::Encoder;
 
-    let dict = if ctx.len() <= arg_dict {
-        None
+    let encoder = if ctx.len() <= arg_dict {
+        Encoder::new(out, level)
     } else {
         match ctx.get_raw(arg_dict) {
-            ValueRef::Integer(-1) => None,
-            ValueRef::Null => None,
-            ValueRef::Blob(d) => Some(Arc::new(wrap_encoder_dict(d.to_vec(), level))),
-            ValueRef::Integer(_) => Some(
-                encoder_dict_from_ctx(ctx, arg_dict, level)
+            ValueRef::Integer(-1) | ValueRef::Null => Encoder::new(out, level),
+            ValueRef::Blob(d) => Encoder::with_dictionary(out, level, d),
+            //Some(Arc::new(wrap_encoder_dict(d.to_vec(), level))),
+            ValueRef::Integer(_) => Encoder::with_prepared_dictionary(
+                out,
+                &*encoder_dict_from_ctx(ctx, arg_dict, level)
                     .context("loading dictionary from int")?,
             ),
             other => anyhow::bail!(
@@ -69,33 +72,26 @@ pub(crate) fn zstd_compress_fn<'a>(
             ),
         }
     };
+    let mut encoder = encoder.context("creating zstd encoder")?;
 
-    let res = {
-        let out = Vec::new();
-        let mut encoder = match &dict {
-            Some(dict) => zstd::stream::write::Encoder::with_prepared_dictionary(out, dict),
-            None => zstd::stream::write::Encoder::new(out, level),
-        }
-        .context("creating zstd encoder")?;
-        /* encoder
-        .get_operation_mut()
-        .context
-        .set_pledged_src_size(input_value.len() as u64)
-        .context("pledge")?;*/
-        if compact {
-            encoder
-                .include_checksum(false)
-                .context("disable checksums")?;
-            encoder.include_contentsize(false).context("cs")?;
-            encoder.include_dictid(false).context("did")?;
-            encoder.include_magicbytes(false).context("did")?;
-        }
+    /* encoder
+    .get_operation_mut()
+    .context
+    .set_pledged_src_size(input_value.len() as u64)
+    .context("pledge")?;*/
+    if compact {
         encoder
-            .write_all(input_value)
-            .context("writing data to zstd encoder")?;
-        encoder.finish().context("finishing zstd stream")?
-    };
-    drop(dict); // to make sure the dict is still in scope because of https://github.com/gyscos/zstd-rs/issues/55
+            .include_checksum(false)
+            .context("disable checksums")?;
+        encoder.include_contentsize(false).context("cs")?;
+        encoder.include_dictid(false).context("did")?;
+        encoder.include_magicbytes(false).context("did")?;
+    }
+    encoder
+        .write_all(input_value)
+        .context("writing data to zstd encoder")?;
+    let res = encoder.finish().context("finishing zstd stream")?;
+
     Ok(ToSqlOutput::Owned(Value::Blob(res)))
 }
 
@@ -135,9 +131,8 @@ pub(crate) fn zstd_decompress_fn<'a>(
         None
     } else {
         match ctx.get_raw(arg_dict) {
-            ValueRef::Integer(-1) => None,
-            ValueRef::Null => None,
-            ValueRef::Blob(d) => Some(Arc::new(wrap_decoder_dict(d.to_vec()))),
+            ValueRef::Integer(-1) | ValueRef::Null => None,
+            ValueRef::Blob(d) => Some(Arc::new(DecoderDictionary::copy(d))),
             ValueRef::Integer(_) => {
                 Some(decoder_dict_from_ctx(ctx, arg_dict).context("load dict")?)
             }

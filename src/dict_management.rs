@@ -5,42 +5,18 @@ use std::time::Duration;
 
 use zstd::dict::{DecoderDictionary, EncoderDictionary};
 
-type OwnedEncoderDict<'a> = owning_ref::OwningHandle<Vec<u8>, Box<EncoderDictionary<'a>>>;
-
-// zstd-rs only exposes zstd_safe::create_cdict_by_reference, not zstd_safe::create_cdict
-// so we need to keep a reference to the vector ourselves
-// is there a better way?
-pub fn wrap_encoder_dict(dict_raw: Vec<u8>, level: i32) -> OwnedEncoderDict<'static> {
-    owning_ref::OwningHandle::new_with_fn(dict_raw, |d| {
-        Box::new(EncoderDictionary::new(
-            unsafe { d.as_ref() }.unwrap(),
-            level,
-        ))
-    })
-}
-
-type OwnedDecoderDict<'a> = owning_ref::OwningHandle<Vec<u8>, Box<DecoderDictionary<'a>>>;
-
-// zstd-rs only exposes zstd_safe::create_cdict_by_reference, not zstd_safe::create_cdict
-// so we need to keep a reference to the vector ourselves
-// is there a better way?
-pub fn wrap_decoder_dict(dict_raw: Vec<u8>) -> OwnedDecoderDict<'static> {
-    owning_ref::OwningHandle::new_with_fn(dict_raw, |d| {
-        Box::new(DecoderDictionary::new(unsafe { &*d }))
-    })
-}
 // TODO: the rust interface currently requires a level when preparing a dictionary, but the zstd interface (ZSTD_CCtx_loadDictionary) does not.
 // TODO: Using LruCache here isn't very smart
 pub fn encoder_dict_from_ctx<'a>(
     ctx: &'a Context,
     arg_index: usize,
     level: i32,
-) -> anyhow::Result<Arc<OwnedEncoderDict<'static>>> {
+) -> anyhow::Result<Arc<EncoderDictionary<'static>>> {
     use lru_time_cache::LruCache;
     // we cache the instantiated encoder dictionaries keyed by (DbConnection, dict_id, compression_level)
     // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
     lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<(usize, i32, i32), Arc<OwnedEncoderDict<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
+        static ref DICTS: RwLock<LruCache<(usize, i32, i32), Arc<EncoderDictionary<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
     }
     let id: i32 = ctx.get(arg_index)?;
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
@@ -63,7 +39,7 @@ pub fn encoder_dict_from_ctx<'a>(
                     |r| r.get(0),
                 )
                 .with_context(|| format!("getting dict with id={} from _zstd_dicts", id))?;
-            let dict = wrap_encoder_dict(dict_raw, level);
+            let dict = EncoderDictionary::copy(&dict_raw, level);
             Arc::new(dict)
         }),
         lru_time_cache::Entry::Occupied(o) => o.into_mut(),
@@ -75,12 +51,12 @@ pub fn encoder_dict_from_ctx<'a>(
 pub fn decoder_dict_from_ctx<'a>(
     ctx: &'a Context,
     arg_index: usize,
-) -> anyhow::Result<Arc<OwnedDecoderDict<'static>>> {
+) -> anyhow::Result<Arc<DecoderDictionary<'static>>> {
     use lru_time_cache::LruCache;
     // we cache the instantiated decoder dictionaries keyed by (DbConnection, dict_id)
     // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
     lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<(usize, i32), Arc<OwnedDecoderDict<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
+        static ref DICTS: RwLock<LruCache<(usize, i32), Arc<DecoderDictionary<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
     }
     let id: i32 = ctx.get(arg_index)?;
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
@@ -101,7 +77,7 @@ pub fn decoder_dict_from_ctx<'a>(
                     |r| r.get(0),
                 )
                 .with_context(|| format!("getting dict with id={} from _zstd_dicts", id))?;
-            let dict = wrap_decoder_dict(dict_raw);
+            let dict = DecoderDictionary::copy(&dict_raw);
             Arc::new(dict)
         }),
         lru_time_cache::Entry::Occupied(o) => o.into_mut(),
