@@ -76,7 +76,7 @@ fn format_blob(b: ValueRef) -> String {
 /// see https://www.sqlite.org/quirks.html#double_quoted_string_literals_are_accepted
 ///
 pub fn escape_sqlite_identifier(identifier: &str) -> String {
-    format!("`{}`", identifier.replace("`", "``"))
+    format!("`{}`", identifier.replace('`', "``"))
 }
 
 /**

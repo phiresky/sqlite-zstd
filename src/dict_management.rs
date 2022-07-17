@@ -46,7 +46,9 @@ pub fn encoder_dict_from_ctx<'a>(
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
     let db_handle_pointer = unsafe { db.handle() } as usize; // SAFETY: We're only getting the pointer as an int, not using the raw connection
 
-    let res = match DICTS.write().unwrap().entry((db_handle_pointer, id, level)) {
+    let mut dicts_write = DICTS.write().unwrap();
+    let entry = dicts_write.entry((db_handle_pointer, id, level));
+    let res = match entry {
         lru_time_cache::Entry::Vacant(e) => e.insert({
             log::debug!(
                 "loading encoder dictionary {} level {} (should only happen once per 10s)",
@@ -83,7 +85,9 @@ pub fn decoder_dict_from_ctx<'a>(
     let id: i32 = ctx.get(arg_index)?;
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
     let db_handle_pointer = unsafe { db.handle() } as usize; // SAFETY: We're only getting the pointer as an int, not using the raw connection
-    let res = match DICTS.write().unwrap().entry((db_handle_pointer, id)) {
+    let mut dicts_write = DICTS.write().unwrap();
+    let entry = dicts_write.entry((db_handle_pointer, id));
+    let res = match entry {
         lru_time_cache::Entry::Vacant(e) => e.insert({
             log::debug!(
                 "loading decoder dictionary {} (should only happen once per 10s)",

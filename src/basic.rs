@@ -60,7 +60,7 @@ pub(crate) fn zstd_compress_fn<'a>(
             ValueRef::Null => None,
             ValueRef::Blob(d) => Some(Arc::new(wrap_encoder_dict(d.to_vec(), level))),
             ValueRef::Integer(_) => Some(
-                encoder_dict_from_ctx(&ctx, arg_dict, level)
+                encoder_dict_from_ctx(ctx, arg_dict, level)
                     .context("loading dictionary from int")?,
             ),
             other => anyhow::bail!(
@@ -139,7 +139,7 @@ pub(crate) fn zstd_decompress_fn<'a>(
             ValueRef::Null => None,
             ValueRef::Blob(d) => Some(Arc::new(wrap_decoder_dict(d.to_vec()))),
             ValueRef::Integer(_) => {
-                Some(decoder_dict_from_ctx(&ctx, arg_dict).context("load dict")?)
+                Some(decoder_dict_from_ctx(ctx, arg_dict).context("load dict")?)
             }
             other => anyhow::bail!(
                 "dict argument must be int or blob, got {}",
@@ -153,7 +153,7 @@ pub(crate) fn zstd_decompress_fn<'a>(
     } else {
         ctx.get(arg_is_compact).context("argument 'compact'")?
     };
-    let dict_ref = dict.as_ref().map(|e| -> &DecoderDictionary { &e });
+    let dict_ref = dict.as_ref().map(|e| -> &DecoderDictionary { e });
 
     zstd_decompress_inner(input_value, dict_ref, output_text, compact)
 }
@@ -167,7 +167,7 @@ fn zstd_decompress_inner<'a>(
     let vec = {
         let out = Vec::new();
         let mut decoder = match &dict {
-            Some(dict) => zstd::stream::write::Decoder::with_prepared_dictionary(out, &dict),
+            Some(dict) => zstd::stream::write::Decoder::with_prepared_dictionary(out, dict),
             None => zstd::stream::write::Decoder::new(out),
         }
         .context("dict load doesn't work")?;

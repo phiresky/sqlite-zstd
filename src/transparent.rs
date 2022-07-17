@@ -91,13 +91,13 @@ pub struct TransparentCompressConfig {
 
 fn pretty_bytes(bytes: i64) -> String {
     if bytes >= 1_000_000_000 {
-        return format!("{:.2}GB", bytes as f64 / 1e9);
+        format!("{:.2}GB", bytes as f64 / 1e9)
     } else if bytes >= 1_000_000 {
-        return format!("{:.2}MB", bytes as f64 / 1e6);
+        format!("{:.2}MB", bytes as f64 / 1e6)
     } else if bytes >= 1_000 {
-        return format!("{:.2}kB", bytes as f64 / 1e3);
+        format!("{:.2}kB", bytes as f64 / 1e3)
     } else {
-        return format!("{}B", bytes);
+        format!("{}B", bytes)
     }
 }
 
@@ -199,7 +199,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         );
         log::debug!("dict_id_columns query {:?}", query);
         db.prepare(&query)?
-            .query_map(params![], |row| Ok(row.get("from")?))
+            .query_map(params![], |row| row.get("from"))
             .context("Could not get dicts ids info")?
             .collect::<Result<Vec<String>, _>>()?
     } else {
@@ -225,7 +225,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             if table_already_enabled {
                 &new_table_name
             } else {
-                &table_name
+                table_name
             }
         ))?
         .query_map(params![], |row| {
@@ -279,7 +279,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         let query = format!(
             "select ({}) as dict_chooser from {} limit 1",
             config.dict_chooser,
-            escape_sqlite_identifier(&table_name)
+            escape_sqlite_identifier(table_name)
         );
         // small sanity check of chooser statement
         db.query_row(&query, params![], |row| row.get::<_, String>(0))
@@ -291,7 +291,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         // can't use prepared statement at these positions
         if !table_already_enabled {
             let rename_query =
-                format_sqlite!("alter table {} rename to {}", &table_name, &new_table_name);
+                format_sqlite!("alter table {} rename to {}", table_name, &new_table_name);
             log::debug!("[run] {}", &rename_query);
             db.execute(&rename_query, params![])
                 .context("Could not rename table")?;
@@ -435,7 +435,7 @@ fn create_or_replace_view(
 ) -> anyhow::Result<()> {
     if table_already_enabled {
         // this drops the existing triggers as well
-        let dropview_query = format!(r#"drop view {}"#, escape_sqlite_identifier(&table_name));
+        let dropview_query = format!(r#"drop view {}"#, escape_sqlite_identifier(table_name));
         log::debug!("[run] {}", &dropview_query);
         db.execute(&dropview_query, params![])
             .context("Could not drop view")?;
@@ -473,9 +473,9 @@ fn create_or_replace_view(
             select {}
             from {}
         "#,
-        escape_sqlite_identifier(&table_name),
+        escape_sqlite_identifier(table_name),
         select_columns_escaped,
-        escape_sqlite_identifier(&internal_table_name)
+        escape_sqlite_identifier(internal_table_name)
     );
     log::debug!("[run] {}", &createview_query);
     db.execute(&createview_query, params![])
@@ -530,8 +530,8 @@ fn create_insert_trigger(
             end;
         ",
         escape_sqlite_identifier(&trigger_name),
-        escape_sqlite_identifier(&table_name),
-        escape_sqlite_identifier(&internal_table_name),
+        escape_sqlite_identifier(table_name),
+        escape_sqlite_identifier(internal_table_name),
         columns_selection.join(", "),
         insert_selection.join(",\n"),
     );
@@ -559,8 +559,8 @@ fn create_delete_trigger(
             end;
         ",
         trg_name = escape_sqlite_identifier(&trigger_name),
-        view = escape_sqlite_identifier(&table_name),
-        backing_table = escape_sqlite_identifier(&internal_table_name),
+        view = escape_sqlite_identifier(table_name),
+        backing_table = escape_sqlite_identifier(internal_table_name),
         primary_key_condition = primary_key_condition
     );
     log::debug!("[run] {}", &deletetrigger_query);
@@ -606,8 +606,8 @@ fn create_update_triggers(
                 end;
             ",
             trg_name = escape_sqlite_identifier(&trigger_name),
-            view_name = escape_sqlite_identifier(&table_name),
-            backing_table = escape_sqlite_identifier(&internal_table_name),
+            view_name = escape_sqlite_identifier(table_name),
+            backing_table = escape_sqlite_identifier(internal_table_name),
             upd_col = escape_sqlite_identifier(&col.name),
             update = update,
             primary_key_condition = primary_key_condition
@@ -621,7 +621,7 @@ fn create_update_triggers(
 
 fn get_configs(db: &rusqlite::Connection) -> Result<Vec<TransparentCompressConfig>, anyhow::Error> {
     // if the table `_zstd_configs` does not exist yet, transparent compression hasn't been used yet, so return an empty array
-    if !check_table_exists(&db, "_zstd_configs") {
+    if !check_table_exists(db, "_zstd_configs") {
         return Ok(vec![]);
     }
 

@@ -26,5 +26,5 @@ pub fn load_with_loglevel(
     default_log_level: LogLevel,
 ) -> anyhow::Result<()> {
     init_logging(default_log_level);
-    crate::add_functions::add_functions(&connection)
+    crate::add_functions::add_functions(connection)
 }
