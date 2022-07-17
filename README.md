@@ -31,22 +31,30 @@ Depending on the data, this can reduce the size of the database by 90% while kee
   - The SQLite streaming blob reading API will be somewhat useless since the blob is fully copied into memory anyways.
   - Attaching a database containing compressed tables using `ATTACH 'foo.db'` is not supported.
 
-- `zstd_incremental_maintenance(duration_seconds: float, db_load: float)`
+- `zstd_incremental_maintenance(duration_seconds: float | null, db_load: float) -> bool`
 
   Perform an incremental maintenance operation taking around the given amount of time.
   This will train dictionaries and compress data based on the grouping given in the TransparentCompressConfig.
-  db_load specifies the ratio of time the db will be locked with write queries. For example: if set to 0.5, after each write operation taking 2 seconds the maintenance function will sleep for 2 seconds so other processes have time to run write operations against the database. If set to 1, the maintenance will not sleep. Note that this is only useful if you run the incremental maintenance function in a separate thread or process than your other logic.
 
-  Returns 1 if there is more work to be done, 0 if everything is compressed as it should.
+  `duration_seconds`: If given amount of time is 0, do a single step and exit as soon as possible. If given amount of time is null, run until all pending maintenance is complete.
+
+  `db_load`: specifies the ratio of time the db will be locked with write queries. For example: if set to 0.5, after each write operation taking 2 seconds the maintenance function will sleep for 2 seconds so other processes have time to run write operations against the database. If set to 1, the maintenance will not sleep. Note that this is only useful if you run the incremental maintenance function in a separate thread or process than your other logic. Note that both the duration and the db load are best-effort: there is no exact guarantee about the amount of time the database will stay locked at a time.
+
+  _Returns_ 1 if there is more work to be done, 0 if everything is compressed as it should.
 
   Note that each call of this function has a start up time cost equivalent to `select * from table where dictid is null`, so longer durations are more efficient.
 
   This function can safely be interrupted at any time, each chunk of compression work is done as an atomic operation.
 
+  Examples:
+
+  - `zstd_incremental_maintenance(null, 1)`: Compresses everying, as fast as possible. Useful if the db is not currently in use.
+  - `zstd_incremental_maintenance(60, 0.5)`: Spend 60 seconds compressing pending stuff, while allowing other queries to run 50% of the time.
+
   Example output:
 
   ```
-  sqlite> select zstd_incremental_maintenance(60);
+  sqlite> select zstd_incremental_maintenance(null, 1);
     [2020-12-23T21:11:31Z WARN  sqlite_zstd::transparent] Warning: It is recommended to set `pragma busy_timeout=2000;` or higher
     [2020-12-23T21:11:40Z INFO  sqlite_zstd::transparent] events.data: Total 5.20GB to potentially compress.
     3[2020-12-23T21:13:22Z INFO  sqlite_zstd::transparent] Compressed 6730 rows with dictid=109. Total size of entries before: 163.77MB, afterwards: 2.12MB, (average: before=24.33kB, after=315B)
@@ -100,7 +108,18 @@ Depending on the data, this can reduce the size of the database by 90% while kee
 
   Same as `zstd_train_dict`, but the dictionary is saved to the `_zstd_dicts` table and the id is returned.
 
-# Installation
+# Compiling
+
+This project can be built in two modes: (a) as a Rust library and (b) as a pure SQLite extension (with `--features build_extension`).
+
+You can get the SQLite extension binaries from the GitHub releases. Alternatively, you can build the extension by hand:
+
+```
+cargo build --release --features build_extension
+# should give you target/release/libsqlite_zstd.so
+```
+
+# Usage
 
 You can either load this library as SQLite extension or as a Rust library. Note that sqlite extensions are not persistent, so you need to load it each time you connect to the database.
 
@@ -118,7 +137,7 @@ sqlite>
 
 Or alternatively:
 
-`sqlite3 -cmd '.load libsqlite_zstd.so'`
+`sqlite3 -cmd '.load libsqlite_zstd.so' 'select * from foo'`
 
 **C Api**
 
@@ -148,7 +167,7 @@ See [here](https://docs.rs/rusqlite/0.24.2/rusqlite/struct.Connection.html#metho
 
 # Verbosity / Debugging
 
-You can change the log level by setting the environment variable `RUST_LOG=sqlite_zstd=error` for less logging and `RUST_LOG=sqlite_zstd=debug` for more logging.
+You can change the log level by setting the environment variable `SQLITE_ZSTD_LOG=error` for less logging and `SQLITE_ZSTD_LOG=debug` for more logging.
 
 # Future Work / Ideas / Todo
 

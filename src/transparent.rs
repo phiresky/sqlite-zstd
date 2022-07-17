@@ -48,7 +48,7 @@ pub struct TransparentCompressConfig {
     pub column: String,
     /// The compression level. Valid levels are 1-19.
     /// Compression will be significantly slower when the level is increased, but decompression speed should stay about the same regardless of compression level.
-    /// That means this is a tradeoff between INSERT vs SELECT performance.
+    /// That means this is a tradeoff between zstd_incremental_maintenance vs SELECT performance.
     pub compression_level: i8,
     /// An SQL expression that chooses which dict to use or returns null if data should stay uncompressed for now
     /// Examples:
@@ -653,9 +653,10 @@ pub fn zstd_incremental_maintenance<'a>(ctx: &Context) -> Result<ToSqlOutput<'a>
     let args = {
         let arg_time_limit_seconds = 0;
         let arg_target_db_load = 1;
-        let time_limit: f64 = ctx
+        let time_limit: Option<f64> = ctx
             .get(arg_time_limit_seconds)
             .context("could not get time limit argument")?;
+        let time_limit = time_limit.unwrap_or(100000000.0);
         let target_db_load: f32 = ctx
             .get(arg_target_db_load)
             .context("could not get target db load argument")?;
@@ -750,11 +751,12 @@ fn maintenance_for_config(
         .map(|e| e.count)
         .sum();
     log::info!(
-        "{}.{}: Total {} rows ({}) to potentially compress.",
+        "{}.{}: Total {} rows ({}) to potentially compress (split in {} groups).",
         config.table,
         config.column,
         total_rows_to_compress,
-        pretty_bytes(total_bytes_to_compress)
+        pretty_bytes(total_bytes_to_compress),
+        todos.len()
     );
     for todo in todos.into_iter() {
         let rows_handled = maintenance_for_todo(db, &config, &todo, &esc_names, args)?;
