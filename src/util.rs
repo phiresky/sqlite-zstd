@@ -15,30 +15,11 @@ pub fn ensure_dicts_table_exists(db: &rusqlite::Connection) -> rusqlite::Result<
 
 /// format an expression while escaping given values as sqlite identifiers
 /// needed since prepared query parameters can't be used in identifier position
-/// (i'm too dumb for recursive macros)
 #[doc(hidden)]
 #[macro_export]
 macro_rules! format_sqlite {
-    ($x:expr) => {
-        format!($x)
-    };
-    ($x:expr, $y:expr) => {
-        format!($x, escape_sqlite_identifier($y))
-    };
-    ($x:expr, $y:expr, $z:expr) => {
-        format!(
-            $x,
-            escape_sqlite_identifier($y),
-            escape_sqlite_identifier($z)
-        )
-    };
-    ($x:expr, $y:expr, $z:expr, $w:expr) => {
-        format!(
-            $x,
-            escape_sqlite_identifier($y),
-            escape_sqlite_identifier($z),
-            escape_sqlite_identifier($w)
-        )
+    ($x:expr, $($y:expr),*) => {
+        format!($x, $(escape_sqlite_identifier($y),)*)
     };
 }
 
