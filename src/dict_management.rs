@@ -37,19 +37,23 @@ pub fn encoder_dict_from_ctx<'a>(
     level: i32,
 ) -> anyhow::Result<Arc<OwnedEncoderDict<'static>>> {
     use lru_time_cache::LruCache;
-
+    // we cache the instantiated encoder dictionaries keyed by (DbConnection, dict_id, compression_level)
+    // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
     lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<(i32, i32), Arc<OwnedEncoderDict<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
+        static ref DICTS: RwLock<LruCache<(usize, i32, i32), Arc<OwnedEncoderDict<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
     }
     let id: i32 = ctx.get(arg_index)?;
-    let res = match DICTS.write().unwrap().entry((id, level)) {
+    let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
+    let db_handle_pointer = unsafe { db.handle() } as usize; // SAFETY: We're only getting the pointer as an int, not using the raw connection
+
+    let res = match DICTS.write().unwrap().entry((db_handle_pointer, id, level)) {
         lru_time_cache::Entry::Vacant(e) => e.insert({
             log::debug!(
                 "loading encoder dictionary {} level {} (should only happen once per 10s)",
                 id,
                 level
             );
-            let db = unsafe { ctx.get_connection()? };
+
             let dict_raw: Vec<u8> = db
                 .query_row(
                     "select dict from _zstd_dicts where id = ?",
@@ -71,12 +75,15 @@ pub fn decoder_dict_from_ctx<'a>(
     arg_index: usize,
 ) -> anyhow::Result<Arc<OwnedDecoderDict<'static>>> {
     use lru_time_cache::LruCache;
-
+    // we cache the instantiated decoder dictionaries keyed by (DbConnection, dict_id)
+    // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
     lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<i32, Arc<OwnedDecoderDict<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
+        static ref DICTS: RwLock<LruCache<(usize, i32), Arc<OwnedDecoderDict<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
     }
     let id: i32 = ctx.get(arg_index)?;
-    let res = match DICTS.write().unwrap().entry(id) {
+    let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
+    let db_handle_pointer = unsafe { db.handle() } as usize; // SAFETY: We're only getting the pointer as an int, not using the raw connection
+    let res = match DICTS.write().unwrap().entry((db_handle_pointer, id)) {
         lru_time_cache::Entry::Vacant(e) => e.insert({
             log::debug!(
                 "loading decoder dictionary {} (should only happen once per 10s)",
