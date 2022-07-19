@@ -58,4 +58,4 @@ names = "0.14.0"
 pretty_assertions = "1.2.1"
 
 [profile.release]
-lto = true
+lto = "fat"

@@ -6,6 +6,7 @@ use rusqlite::functions::Context;
 use rusqlite::types::ToSqlOutput;
 use rusqlite::types::{Value, ValueRef};
 use std::{io::Write, sync::Arc};
+use zstd::bulk::Compressor;
 use zstd::dict::DecoderDictionary;
 
 /// null_dict_is_passthrough is only true when called through the `zstd_compress_col` function (for transparent compression)
@@ -51,36 +52,48 @@ pub(crate) fn zstd_compress_fn<'a>(
     } else {
         ctx.get(arg_is_compact).context("is_compact argument")?
     };
-    let out = Vec::new();
-    use zstd::stream::write::Encoder;
 
-    let encoder = if ctx.len() <= arg_dict {
-        Encoder::new(out, level)
+    if ctx.len() <= arg_dict {
+        zstd_compress_fn_tail(compact, input_value, Compressor::new(level))
     } else {
         match ctx.get_raw(arg_dict) {
-            ValueRef::Integer(-1) | ValueRef::Null => Encoder::new(out, level),
-            ValueRef::Blob(d) => Encoder::with_dictionary(out, level, d),
+            ValueRef::Integer(-1) | ValueRef::Null => {
+                zstd_compress_fn_tail(compact, input_value, Compressor::new(level))
+            }
+            ValueRef::Blob(d) => {
+                zstd_compress_fn_tail(compact, input_value, Compressor::with_dictionary(level, d))
+            }
             //Some(Arc::new(wrap_encoder_dict(d.to_vec(), level))),
-            ValueRef::Integer(_) => Encoder::with_prepared_dictionary(
-                out,
-                #[allow(clippy::explicit_auto_deref)]
-                // https://github.com/rust-lang/rust-clippy/issues/9143
-                &*encoder_dict_from_ctx(ctx, arg_dict, level)
-                    .context("loading dictionary from int")?,
-            ),
+            ValueRef::Integer(_) => {
+                let dick = encoder_dict_from_ctx(ctx, arg_dict, level)
+                    .context("loading dictionary from int")?;
+
+                let enc = Compressor::with_prepared_dictionary(&dick);
+                zstd_compress_fn_tail(compact, input_value, enc)
+            }
             other => anyhow::bail!(
                 "dict argument must be int or blob, got {}",
                 other.data_type()
             ),
         }
-    };
-    let mut encoder = encoder.context("creating zstd encoder")?;
+    }
+}
 
-    /* encoder
-    .get_operation_mut()
-    .context
-    .set_pledged_src_size(input_value.len() as u64)
-    .context("pledge")?;*/
+// separate fn purely for borrowship simplicity
+fn zstd_compress_fn_tail<'a>(
+    compact: bool,
+    input_value: &[u8],
+    encoder: Result<Compressor, std::io::Error>,
+) -> anyhow::Result<ToSqlOutput<'a>> {
+    let mut encoder = encoder.context("creating zstd encoder")?;
+    {
+        // pledge source size (benchmarking shows this doesn't help any tho)
+        let cctx = encoder.context_mut();
+        cctx.set_pledged_src_size(input_value.len() as u64)
+            .map_err(|c| anyhow::anyhow!("setting pledged source size (code {c})"))?;
+        // cctx.set_parameter(zstd::zstd_safe::CParameter::BlockDelimiters(false))
+        //    .map_err(|_| anyhow::anyhow!("no"))?;
+    }
     if compact {
         encoder
             .include_checksum(false)
@@ -89,10 +102,9 @@ pub(crate) fn zstd_compress_fn<'a>(
         encoder.include_dictid(false).context("did")?;
         encoder.include_magicbytes(false).context("did")?;
     }
-    encoder
-        .write_all(input_value)
+    let res = encoder
+        .compress(input_value)
         .context("writing data to zstd encoder")?;
-    let res = encoder.finish().context("finishing zstd stream")?;
 
     Ok(ToSqlOutput::Owned(Value::Blob(res)))
 }
@@ -162,6 +174,7 @@ fn zstd_decompress_inner<'a>(
     compact: bool,
 ) -> anyhow::Result<ToSqlOutput<'a>> {
     let vec = {
+        // todo: use zstd::bulk api maybe (but we don't know the output size)
         let out = Vec::new();
         let mut decoder = match &dict {
             Some(dict) => zstd::stream::write::Decoder::with_prepared_dictionary(out, dict),

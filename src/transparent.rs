@@ -827,7 +827,7 @@ fn maintenance_for_todo(
             dictcol = esc_names.dict_colname,
             chooser = config.dict_chooser
         );
-        // log::trace!("executing {}", q);
+        log::trace!("executing {}", q);
         let updated = db
             .execute(
                 q,
