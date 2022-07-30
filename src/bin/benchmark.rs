@@ -17,6 +17,8 @@ struct Config {
     zstd_lib: String,
     #[structopt(short, long)]
     hot_cache: bool,
+    #[structopt(short, long)]
+    iterations: i32,
 }
 
 fn pragmas(db: &Connection) -> Result<()> {
@@ -105,6 +107,21 @@ impl UpdateBench {
             values: ids.into_iter().zip(values).collect(),
         }))
     }
+    fn prepare_sequential(conn: &Connection) -> Result<Box<dyn Bench>> {
+        let ids: Vec<DbId> = conn
+            .prepare("select id from title_basics where id >= (select id from title_basics order by random() limit 1) order by id asc limit 1000")?
+            .query_map(params![], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        let values: Vec<String> = conn
+            .prepare("select data from title_basics order by random() limit ?")?
+            .query_map(params![ids.len()], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(Box::new(UpdateBench {
+            name: "Update 1000 sequential (compressed) values",
+            values: ids.into_iter().zip(values).collect(),
+        }))
+    }
 }
 impl Bench for UpdateBench {
     fn name(&self) -> &str {
@@ -176,7 +193,7 @@ fn main() -> Result<()> {
     let config = Config::from_args();
     //let input_db = Connection::open_with_flags(config.input_db)?;
 
-    let its_per_bench = 10;
+    let its_per_bench = config.iterations;
 
     println!("location,db filename,test name,iterations/s,number of samples");
 
@@ -188,6 +205,7 @@ fn main() -> Result<()> {
             Box::new(SelectBench::prepare_random),
             Box::new(SelectBench::prepare_sequential),
             Box::new(UpdateBench::prepare_random),
+            Box::new(UpdateBench::prepare_sequential),
             Box::new(InsertBench::prepare_random),
         ];
         preparers
