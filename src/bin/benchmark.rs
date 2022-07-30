@@ -4,10 +4,7 @@ use anyhow::Context;
 use anyhow::Result;
 use rand::seq::SliceRandom;
 use rusqlite::{params, Connection, OpenFlags};
-use std::{
-    fs::File,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 use std::{io::Write, time::Instant};
 use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
@@ -46,25 +43,29 @@ trait Bench {
     fn name(&self) -> &str;
     fn execute(&self, conn: &Connection) -> Result<i64>;
 }
+
+type DbId = i64;
 struct SelectBench {
     name: &'static str,
-    ids: Vec<String>,
+    ids: Vec<DbId>,
 }
 
-fn prepare_sequential_select(conn: &Connection) -> Result<Box<dyn Bench>> {
-    Ok(Box::new(SelectBench {
-        name: "sequential-select",
-            ids: conn.prepare("select id from events where timestamp_unix_ms >= (select timestamp_unix_ms from events order by random() limit 1) order by timestamp_unix_ms asc limit 10000")?.query_map(params![], |r| r.get(0))?.collect::<Result<_, _>>()?
+impl SelectBench {
+    fn prepare_sequential(conn: &Connection) -> Result<Box<dyn Bench>> {
+        Ok(Box::new(SelectBench {
+        name: "Select 1000 sequential (compressed) values",
+            ids: conn.prepare("select id from title_basics where id >= (select id from title_basics order by random() limit 1) order by id asc limit 1000")?.query_map(params![], |r| r.get(0))?.collect::<Result<_, _>>()?
         }))
-}
-fn prepare_random_select(conn: &Connection) -> Result<Box<dyn Bench>> {
-    Ok(Box::new(SelectBench {
-        name: "random-select",
-        ids: conn
-            .prepare("select id from events order by random() limit 10000")?
-            .query_map(params![], |r| r.get(0))?
-            .collect::<Result<_, _>>()?,
-    }))
+    }
+    fn prepare_random(conn: &Connection) -> Result<Box<dyn Bench>> {
+        Ok(Box::new(SelectBench {
+            name: "Select 1000 random (compressed) values",
+            ids: conn
+                .prepare("select id from title_basics order by random() limit 1000")?
+                .query_map(params![], |r| r.get(0))?
+                .collect::<Result<_, _>>()?,
+        }))
+    }
 }
 
 impl Bench for SelectBench {
@@ -72,7 +73,7 @@ impl Bench for SelectBench {
         self.name
     }
     fn execute(&self, conn: &Connection) -> Result<i64> {
-        let mut stmt = conn.prepare("select data from events where id = ?")?;
+        let mut stmt = conn.prepare("select data from title_basics where id = ?")?;
         let mut total_len = 0;
         for id in &self.ids {
             let data: String = stmt.query_row(params![id], |r| r.get(0))?;
@@ -84,9 +85,75 @@ impl Bench for SelectBench {
     }
 }
 
+struct UpdateBench {
+    name: &'static str,
+    values: Vec<(DbId, String)>,
+}
+impl UpdateBench {
+    fn prepare_random(conn: &Connection) -> Result<Box<dyn Bench>> {
+        let ids: Vec<DbId> = conn
+            .prepare("select id from title_basics order by random() limit 1000")?
+            .query_map(params![], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        let values: Vec<String> = conn
+            .prepare("select data from title_basics order by random() limit 1000")?
+            .query_map(params![], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(Box::new(UpdateBench {
+            name: "Update 1000 random (compressed) values",
+            values: ids.into_iter().zip(values).collect(),
+        }))
+    }
+}
+impl Bench for UpdateBench {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn execute(&self, conn: &Connection) -> Result<i64> {
+        conn.execute("begin", params![])?;
+        let mut stmt = conn.prepare("update title_basics set data = ? where id = ?")?;
+        for (id, value) in &self.values {
+            stmt.execute(params![value, id])?;
+        }
+        conn.execute("commit", params![])?;
+        Ok(self.values.len() as i64)
+    }
+}
+struct InsertBench {
+    name: &'static str,
+    values: Vec<String>,
+}
+impl InsertBench {
+    fn prepare_random(conn: &Connection) -> Result<Box<dyn Bench>> {
+        let values: Vec<String> = conn
+            .prepare("select data from title_basics order by random() limit 1000")?
+            .query_map(params![], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(Box::new(InsertBench {
+            name: "Insert 1000 new values",
+            values,
+        }))
+    }
+}
+impl Bench for InsertBench {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn execute(&self, conn: &Connection) -> Result<i64> {
+        conn.execute("begin", params![])?;
+        let mut stmt = conn.prepare("insert into title_basics (data) values (?)")?;
+        for value in &self.values {
+            stmt.execute(params![value])?;
+        }
+        conn.execute("commit", params![])?;
+        Ok(self.values.len() as i64)
+    }
+}
+
 fn drop_caches() -> Result<()> {
     eprintln!("dropping caches");
-    assert!(std::process::Command::new("sync").status()?.success(), true);
+    assert!(std::process::Command::new("sync").status()?.success());
     std::fs::OpenOptions::new()
         .read(false)
         .write(true)
@@ -109,24 +176,24 @@ fn main() -> Result<()> {
     let config = Config::from_args();
     //let input_db = Connection::open_with_flags(config.input_db)?;
 
-    let table = "events";
-    let time_column = "timestamp_unix_ms";
-
-    let its_per_bench = 50;
+    let its_per_bench = 10;
 
     println!("location,db filename,test name,iterations/s,number of samples");
 
     let benches: Vec<Vec<_>> = {
-        let mut db1 =
+        let db1 =
             Connection::open_with_flags(&config.input_db[0], OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-
-        let preparers = vec![
-            Box::new(prepare_random_select) as Box<dyn Fn(&Connection) -> Result<Box<dyn Bench>>>,
-            Box::new(prepare_sequential_select),
+        type Preparer = Box<dyn Fn(&Connection) -> Result<Box<dyn Bench>>>;
+        let preparers: Vec<Preparer> = vec![
+            Box::new(SelectBench::prepare_random),
+            Box::new(SelectBench::prepare_sequential),
+            Box::new(UpdateBench::prepare_random),
+            Box::new(InsertBench::prepare_random),
         ];
         preparers
             .iter()
             .map(|preparer| {
+                eprintln!("running preparer {its_per_bench} times");
                 (0..its_per_bench)
                     .map(|i| preparer(&db1))
                     .collect::<Result<_, _>>()
@@ -163,6 +230,7 @@ fn main() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
         for bench_its in &benches {
+            // eprintln!("{locjoi} benchmark {}", bench_its[0].name());
             let mut targets: Vec<_> = db_paths
                 .iter()
                 .map(|path| BenchTarget {
@@ -171,7 +239,11 @@ fn main() -> Result<()> {
                     path: path.clone(),
                 })
                 .collect();
-            for bench in bench_its {
+            for (i, bench) in bench_its.iter().enumerate() {
+                eprintln!(
+                    "{locjoi} benchmark {} iteration {i} / {its_per_bench}",
+                    bench.name()
+                );
                 if !config.hot_cache {
                     drop_caches()?;
                 }
@@ -190,7 +262,7 @@ fn main() -> Result<()> {
             targets.sort_by_key(|e| e.path.clone());
             for target in &targets {
                 println!(
-                    "{},{},{},{},{}",
+                    "{},{},{},{:.0},{}",
                     location_name,
                     target.path.file_name().unwrap().to_string_lossy(),
                     bench_its[0].name(),

@@ -1,14 +1,15 @@
 use log::LevelFilter;
 
 pub fn ensure_dicts_table_exists(db: &rusqlite::Connection) -> rusqlite::Result<()> {
-    db.execute(
+    db.execute_batch(
         "
         create table if not exists _zstd_dicts (
             id integer primary key autoincrement,
             chooser_key text unique,
             dict blob not null
-        );",
-        rusqlite::params![],
+        );
+        insert or ignore into _zstd_dicts values (-1, '[nodict]', ''); -- only added so foreign key is fulfilled
+        ",
     )?;
     Ok(())
 }

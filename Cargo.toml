@@ -15,7 +15,7 @@ build_extension = ["rusqlite/loadable_extension"]
 
 # debug_zstd = ["zstd/debug"]
 
-benchmark = ["structopt", "procfs", "rusqlite/backup", "rusqlite/load_extension"]
+benchmark = ["structopt", "procfs", "rusqlite/backup", "rusqlite/load_extension", "csv"]
 
 all = ["benchmark"]
 
@@ -24,7 +24,7 @@ name = "benchmark"
 required-features = ["benchmark"]
 
 [[bin]]
-name = "test-zstd-bug"
+name = "create_test_db"
 required-features = ["benchmark"]
 
 [lib]
@@ -38,6 +38,7 @@ anyhow = "1.0.44"
 serde = {version = "1.0.130", features = ["derive"]}
 serde_json = "1.0.68"
 
+csv = {version = "1.1.6", optional = true}
 env_logger = "0.9.0"
 lazy_static = "1.4.0"
 log = "0.4.14"
