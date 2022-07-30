@@ -488,7 +488,7 @@ fn create_insert_trigger(
     columns_info: &[ColumnInfo],
     table_name: &str,
     internal_table_name: &str,
-    config: &TransparentCompressConfig,
+    _config: &TransparentCompressConfig,
 ) -> anyhow::Result<()> {
     let trigger_name = format!("{}_insert_trigger", table_name);
 
@@ -506,13 +506,9 @@ fn create_insert_trigger(
             let dict_id = get_dict_id(&c.name);
             insert_selection.push(format!(
                 // prepared statement parameters not allowed in view
-                "zstd_compress_col(new.{col}, {lvl}, (select id from _zstd_dicts where chooser_key=({chooser})), {compact}) as {col},
-                (select id from _zstd_dicts where chooser_key=({chooser})) as {dictcol}",
-                col=escape_sqlite_identifier(&c.name),
-                lvl=config.compression_level,
-                chooser=config.dict_chooser,
-                dictcol=escape_sqlite_identifier(&dict_id),
-                compact=COMPACT
+                "new.{col} as {col}, null as {dictcol}",
+                col = escape_sqlite_identifier(&c.name),
+                dictcol = escape_sqlite_identifier(&dict_id)
             ));
             columns_selection.push(String::from(&dict_id));
         } else {
@@ -575,7 +571,7 @@ fn create_update_triggers(
     table_name: &str,
     internal_table_name: &str,
     primary_key_condition: &str,
-    config: &TransparentCompressConfig,
+    _config: &TransparentCompressConfig,
 ) -> anyhow::Result<()> {
     for col in columns_info {
         if col.is_dict_id {
@@ -586,11 +582,9 @@ fn create_update_triggers(
 
         let update = if col.to_compress {
             format!(
-                "{col} = zstd_compress_col(new.{col}, {lvl}, {dictcol}, {compact})",
+                "{col} = new.{col}, {dictcol} = null",
                 col = escape_sqlite_identifier(&col.name),
-                lvl = config.compression_level,
                 dictcol = escape_sqlite_identifier(&get_dict_id(&col.name)),
-                compact = COMPACT
             )
         } else {
             format_sqlite!("{} = new.{}", &col.name, &col.name)
