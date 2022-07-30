@@ -1,3 +1,4 @@
+use crate::transparent::pretty_bytes;
 use crate::util::*;
 use anyhow::Context as AContext;
 use rand::Rng;
@@ -73,7 +74,7 @@ impl rusqlite::functions::Aggregate<ZstdTrainDictState, Value> for ZstdTrainDict
         let state =
             state.ok_or_else(|| ah(anyhow::anyhow!("tried to train zstd dict on zero rows")))?;
         log::debug!(
-            "training dict of size {}kB with {} samples of total size {}kB (of {} samples seen)",
+            "training dict of max size {}kB with {} samples of total size {}kB (of {} samples seen)",
             state.wanted_dict_size / 1000,
             state.reservoir.len(),
             state.reservoir.iter().map(|x| x.len()).sum::<usize>() / 1000,
@@ -82,6 +83,10 @@ impl rusqlite::functions::Aggregate<ZstdTrainDictState, Value> for ZstdTrainDict
         let dict = zstd::dict::from_samples(&state.reservoir, state.wanted_dict_size)
             .context("Training dictionary failed")
             .map_err(ah)?;
+        log::debug!(
+            "resulting dict has size {}",
+            pretty_bytes(dict.len() as i64)
+        );
         if let Some(key) = state.chooser_key {
             let db = unsafe { ctx.get_connection()? };
             ensure_dicts_table_exists(&db)?;

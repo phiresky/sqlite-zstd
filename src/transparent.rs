@@ -89,7 +89,7 @@ pub struct TransparentCompressConfig {
     pub incremental_compression_step_bytes: i64,
 }
 
-fn pretty_bytes(bytes: i64) -> String {
+pub fn pretty_bytes(bytes: i64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.2}GB", bytes as f64 / 1e9)
     } else if bytes >= 1_000_000 {
@@ -951,7 +951,7 @@ fn get_or_train_dict(
                 / avg_sample_bytes as f32) as i64; // use roughly 100x the size of the dictionary as data
 
             log::debug!(
-                "Training dict for key {} of size {}",
+                "Training dict for key {} of max size {}",
                 dict_choice,
                 pretty_bytes(dict_target_size)
             );
