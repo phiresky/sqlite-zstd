@@ -4,6 +4,8 @@ Extension for sqlite that provides transparent dictionary-based row-level compre
 
 See also the announcment blog post for some motivation, benchmarks and ramblings: https://phiresky.github.io/blog/2022/sqlite-zstd
 
+[![size comparison chart](doc/2022-07-31-19-27-57.png)](https://phiresky.github.io/blog/2022/sqlite-zstd)
+
 Depending on the data, this can reduce the size of the database by 90% while keeping performance mostly the same (or even improving it, since the data to be read from disk is smaller).
 
 ## Transparent Compression
