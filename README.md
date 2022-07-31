@@ -124,6 +124,10 @@ cargo build --release --features build_extension
 
 You can either load this library as SQLite extension or as a Rust library. Note that sqlite extensions are not persistent, so you need to load it each time you connect to the database.
 
+**Is this library production ready?**
+
+I wouldn't trust it with my data (yet). Make sure you have backups of everything. I'm also not making any guarantees for backwards compatibility of future updates, though migrating by copying over the uncompressed data should of course work fine.
+
 **Sqlite CLI**
 
 Either load it in the REPL:
@@ -172,23 +176,8 @@ You can change the log level by setting the environment variable `SQLITE_ZSTD_LO
 
 # Future Work / Ideas / Todo
 
-TODO: describe
-
-- fix multiple open connections regarding global dict cache
-- data use statistics
-- performance implications
-- how it works
 - investigate startup cost without dictionary
-- correctly handle indices over compressed columns
+- correctly handle indices over compressed columns (try generated columns instead of views, maybe vtables, ask the sqlite devs)
 - do compression in different thread(s) for performance (e.g. using .multithread(1) in zstd?)
 - type affinity interferes with int pass through - `insert into compressed (col) values (1)` will result in typeof(col) = text instead of integer if the type of the column was declared as text - which in turns causes decompression to fail with "got string, but zstd compressed data is always blob"
-  - either change the type of the compressed column to blob or similar or disallow integer passthrough
-
-select zstd_enable_transparent('{"table": "events", "column": "data", "compression_level": 19, "dict_chooser": "case when date(timestamp, ''weekday 0'') < date(''now'', ''weekday 0'') then data_type || ''.'' || date(timestamp, ''weekday 0'') else null end"}');
-
-select
-case when date(timestamp, 'weekday 0') < date('now', 'weekday 0')
-then data_type || '.' || date(timestamp, 'weekday 0')
-else null
-END
-from events limit 10000
+- either change the type of the compressed column to blob or similar or disallow integer passthrough
