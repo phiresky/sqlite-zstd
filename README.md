@@ -8,6 +8,8 @@ See also the announcment blog post for some motivation, benchmarks and ramblings
 
 Depending on the data, this can reduce the size of the database by 80% while keeping performance mostly the same (or even improving it, since the data to be read from disk is smaller).
 
+Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs might be suited better depending on the use case. That has very different tradeoffs and capabilities, but the end result is similar.
+
 ## Transparent Compression
 
 - `zstd_enable_transparent(config)`
