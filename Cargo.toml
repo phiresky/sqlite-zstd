@@ -6,6 +6,7 @@ license = "LGPL-2.0-or-later"
 name = "sqlite-zstd"
 repository = "https://github.com/phiresky/sqlite-zstd"
 version = "0.3.2"
+readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
@@ -60,3 +61,20 @@ pretty_assertions = "1.2.1"
 
 [profile.release]
 lto = "fat"
+
+# cargo-deb configuration
+# https://github.com/kornelski/cargo-deb
+[package.metadata.deb]
+# Debianized package name, conveniently matches the name of the shared library file
+name = "libsqlite-zstd"
+# $auto fills in the automatically calculated dependencies (namely libc)
+# libsqlite3-0 is added because this library isn't very useful without SQLite
+depends = "$auto, libsqlite3-0"
+# This feature is required to build the shared library extension
+features = ["build_extension"]
+assets = [
+    # Install the shared library extension to /usr/lib, where SQLite can find it
+    ["target/release/libsqlite_zstd.so", "usr/lib/", "744"],
+    # It's good practice to install the README file into /usr/share/doc for every package
+    ["README.md", "usr/share/doc/libsqlite-zstd/README", "644"],
+]
