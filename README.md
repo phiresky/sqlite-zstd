@@ -2,7 +2,7 @@
 
 Extension for sqlite that provides transparent dictionary-based row-level compression for sqlite. This basically allows you to compress entries in a sqlite database almost as well as if you were compressing the whole DB file, but while retaining random access.
 
-See also the announcement blog post for some motivation, benchmarks and ramblings: https://phiresky.github.io/blog/2022/sqlite-zstd
+See also the announcment blog post for some motivation, benchmarks and ramblings: https://phiresky.github.io/blog/2022/sqlite-zstd
 
 [![size comparison chart](doc/2022-07-31-19-27-57.png)](https://phiresky.github.io/blog/2022/sqlite-zstd)
 
