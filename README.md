@@ -126,6 +126,32 @@ cargo build --release --features build_extension
 # should give you target/release/libsqlite_zstd.so
 ```
 
+## Cross Compiling
+
+For cross-compiling to `aarch64-linux-android`, you need to
+1. Donwload the target we need to cross-compile
+```bash
+rustup target add aarch64_linux_android
+```
+
+2. Prepare the [Android NDK](https://developer.android.com/ndk) (The binutils is deprecated and removed from NDK 23+, so you need to download an older version of NDK)
+
+3. Setup NDK binary path
+```bash
+export PATH="$PATH:<NDK_DIR>/toolchains/llvm/prebuilt/linux-x86_64/bin"
+```
+
+4. Specify linker in [cargo configuration file](https://doc.rust-lang.org/cargo/reference/config.html)
+```toml
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android23-clang"
+```
+
+5. Specify `target` accordingly when building
+```bash
+cargo build -r --features build_extension --target aarch64-linux-android
+```
+
 # Usage
 
 You can either load this library as SQLite extension or as a Rust library. Note that sqlite extensions are not persistent, so you need to load it each time you connect to the database.
