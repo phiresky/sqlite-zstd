@@ -111,7 +111,7 @@ Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs migh
 
   Note that dict_size and sample_count are assumed to be constants.
 
-- `zstd_train_dict_and_save(agg, dict_size: int, sample_count: int) -> int`
+- `zstd_train_dict_and_save(agg, dict_size: int, sample_count: int, dict_chooser_key: text) -> int`
 
   Same as `zstd_train_dict`, but the dictionary is saved to the `_zstd_dicts` table and the id is returned.
 
