@@ -69,6 +69,10 @@ Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs migh
     [2020-12-23T21:14:06Z INFO  sqlite_zstd::transparent] Compressed 5228 rows with dictid=111. Total size of entries before: 91.97MB, afterwards: 1.41MB, (average: before=17.59kB, after=268B)
   ```
 
+- `zstd_train_dict_and_save(agg, dict_size: int, sample_count: int, dict_chooser_key: text) -> int`
+
+  This function is used internally by zstd_incremental_maintenance. Same as `zstd_train_dict`, but the dictionary is saved to the `_zstd_dicts` table and the id is returned. The dict_chooser_key is used to identify the dictionary during compression, but during decompression only the integer primary key is used (that way changing the dict chooser expression is safe).
+  
 ## Basic Functionality
 
 - `zstd_compress(data: text|blob, level: int = 3, dictionary: blob | int | null = null, compact: bool = false) -> blob`
@@ -110,10 +114,6 @@ Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs migh
   ```
 
   Note that dict_size and sample_count are assumed to be constants.
-
-- `zstd_train_dict_and_save(agg, dict_size: int, sample_count: int, dict_chooser_key: text) -> int`
-
-  Same as `zstd_train_dict`, but the dictionary is saved to the `_zstd_dicts` table and the id is returned.
 
 # Compiling
 
