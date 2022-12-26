@@ -129,7 +129,7 @@ cargo build --release --features build_extension
 ## Cross Compiling
 
 For cross-compiling to `aarch64-linux-android`, you need to
-1. Donwload the target we need to cross-compile
+1. Download the target we need to cross-compile
 ```bash
 rustup target add aarch64_linux_android
 ```
