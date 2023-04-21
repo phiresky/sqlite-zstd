@@ -26,7 +26,7 @@ Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs migh
   ```
 
   The data will be moved to `_table_name_zstd`, while `table_name` will be a view that can be queried as normally, including SELECT, INSERT, UPDATE, and DELETE queries. This function will not compress any data by itself, you need to call `zstd_incremental_maintenance` afterwards.
-
+  
   `config` is a json object describing the configuration. See [TransparentCompressConfig](src/transparent.rs#L34) for detail.
 
   The following differences apply when compression is active:
@@ -42,6 +42,8 @@ Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs migh
 
   Perform an incremental maintenance operation taking around the given amount of time.
   This will train dictionaries and compress data based on the grouping given in the TransparentCompressConfig.
+  
+  **In order for the size of your database file to actually shrink, you also have to call "VACUUM"**. Otherwise SQLite just marks pages as free (and reuses them for new data).
 
   `duration_seconds`: If given amount of time is 0, do a single step and exit as soon as possible. If given amount of time is null, run until all pending maintenance is complete.
 
