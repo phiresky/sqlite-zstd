@@ -154,6 +154,19 @@ linker = "aarch64-linux-android23-clang"
 cargo build -r --features build_extension --target aarch64-linux-android
 ```
 
+## As a Python "extension"
+
+If you want to use this project as an SQLite extension inside a Python project,
+you can install it as a Python package (you still need to have a rust compiler
+to actually build the binary):
+
+```bash
+pip install 'git+https://github.com/phiresky/sqlite-zstd.git#egg=sqlite_zstd&subdirectory=python'
+```
+
+This installs the extension as a Python package, with some support code to make
+it easy to use from Python code or [Datasette](https://datasette.io/).
+
 # Usage
 
 You can either load this library as SQLite extension or as a Rust library. Note that sqlite extensions are not persistent, so you need to load it each time you connect to the database.
@@ -203,6 +216,22 @@ conn.load_extension("libsqlite_zstd.so", None)?;
 ```
 
 See [here](https://docs.rs/rusqlite/0.24.2/rusqlite/struct.Connection.html#method.load_extension) for more information.
+
+**Python**
+
+If you have installed this as a Python module as described above, you can load
+the extension into an existion SQLite connection like this:
+
+```python
+import sqlite3
+import sqlite_zstd
+
+conn = sqlite3.connect(':memory:')
+sqlite_zstd.load(conn)
+```
+
+When using Datasette, this extension is loaded automatically into every
+connection.
 
 # Verbosity / Debugging
 
