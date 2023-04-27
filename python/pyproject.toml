@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.2", "setuptools_scm>=6.2", "setuptools_rust"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqlite-zstd"
+requires-python = ">=3.9"
+dynamic = ["version"]
+
+[project.entry-points.datasette]
+sqlite_zstd = "sqlite_zstd.datasette"
+
+[tool.setuptools.package-dir]
+sqlite_zstd = "lib"
+
+[tool.setuptools_scm]
+root = ".."
