@@ -2,8 +2,6 @@ name: Publish to PyPI
 
 on:
   push:
-    tags:
-     - '*'
 
 jobs:
   build_wheels:
@@ -35,6 +33,7 @@ jobs:
 
       - uses: actions/upload-artifact@v3
         with:
+          name: wheel-${{ runner.os }}
           path: ./python/wheelhouse/*.whl
 
   build_sdist:
@@ -62,19 +61,20 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
+          name: sdist-${{ runner.os }}
           path: python/dist/*.tar.gz
-          
-  release:
-    needs: [build_wheels, build_sdist]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v2
-        with:
-          name: artifact
-          path: python/dist
+  
+#   release:
+#     needs: [build_wheels, build_sdist]
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/download-artifact@v2
+#         with:
+#           name: artifact
+#           path: python/dist
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: python/dist/
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
+#       - uses: pypa/gh-action-pypi-publish@release/v1
+#         with:
+#           packages-dir: python/dist/
+#           user: __token__
+#           password: ${{ secrets.PYPI_API_TOKEN }}
