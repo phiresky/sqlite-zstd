@@ -52,7 +52,7 @@ structopt = {version = "0.3.23", optional = true}
 [dependencies.rusqlite]
 features = ["functions", "blob", "bundled", "array"]
 package = "rusqlite-le"
-version = "~0"
+version = "0.31.0"
 
 [dev-dependencies]
 chrono = "0.4.19"
