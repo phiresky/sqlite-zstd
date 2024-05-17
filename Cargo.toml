@@ -31,8 +31,9 @@ required-features = ["benchmark"]
 [lib]
 crate-type = ["lib", "cdylib"]
 
+#, features = ["experimental"]
 [dependencies]
-zstd = {version = "0.11.2", features = ["experimental"]}
+zstd = {version = "0.11.2"}
 #zstd = {version = "0.5.3", path="../zstd-rs"}
 #zstd = {version = "=0.5.4"}
 anyhow = "1.0.44"
