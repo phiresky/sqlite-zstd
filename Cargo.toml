@@ -29,7 +29,7 @@ name = "create_test_db"
 required-features = ["benchmark"]
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 zstd = {version = "0.11.2", features = ["experimental"]}
