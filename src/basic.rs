@@ -89,7 +89,7 @@ fn zstd_compress_fn_tail<'a>(
     {
         // pledge source size (benchmarking shows this doesn't help any tho)
         let cctx = encoder.context_mut();
-        cctx.set_pledged_src_size(input_value.len() as u64)
+        cctx.set_pledged_src_size(Some(input_value.len() as u64))
             .map_err(|c| anyhow::anyhow!("setting pledged source size (code {c})"))?;
         // cctx.set_parameter(zstd::zstd_safe::CParameter::BlockDelimiters(false))
         //    .map_err(|_| anyhow::anyhow!("no"))?;
