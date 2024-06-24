@@ -58,7 +58,7 @@ pub mod tests {
     use super::*;
     use anyhow::Context;
     use chrono::TimeZone;
-    pub use pretty_assertions::{assert_eq, assert_ne};
+    pub use pretty_assertions::assert_eq;
 
     use rusqlite::{params, Connection};
     use serde::{Deserialize, Serialize};
