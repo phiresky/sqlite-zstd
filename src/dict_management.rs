@@ -7,8 +7,8 @@ use zstd::dict::{DecoderDictionary, EncoderDictionary};
 
 // TODO: the rust interface currently requires a level when preparing a dictionary, but the zstd interface (ZSTD_CCtx_loadDictionary) does not.
 // TODO: Using LruCache here isn't very smart
-pub fn encoder_dict_from_ctx<'a>(
-    ctx: &'a Context,
+pub fn encoder_dict_from_ctx(
+    ctx: &Context,
     arg_index: usize,
     level: i32,
 ) -> anyhow::Result<Arc<EncoderDictionary<'static>>> {
@@ -48,8 +48,8 @@ pub fn encoder_dict_from_ctx<'a>(
     Ok(res)
 }
 
-pub fn decoder_dict_from_ctx<'a>(
-    ctx: &'a Context,
+pub fn decoder_dict_from_ctx(
+    ctx: &Context,
     arg_index: usize,
 ) -> anyhow::Result<Arc<DecoderDictionary<'static>>> {
     use lru_time_cache::LruCache;
