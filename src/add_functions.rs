@@ -148,7 +148,7 @@ pub mod tests {
         ];
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let event_type_dist = WeightedIndex::new(&[10, 10, 1])?;
+        let event_type_dist = WeightedIndex::new([10, 10, 1])?;
         let window_properties_dist = WeightedIndex::new(window_properties.iter().map(|e| e.0))?;
         let app_id_dist = rand::distributions::Uniform::from(0..100);
         let data = (0..eles).map(|_| match event_type_dist.sample(&mut rng) {
