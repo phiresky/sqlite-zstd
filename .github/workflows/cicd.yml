@@ -166,9 +166,11 @@ jobs:
           echo set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS:-<empty>/false}
           echo ::set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS}
           # * strip executable?
-          STRIP="strip" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; *-apple-darwin) STRIP="strip -sX" ;; esac;
+          STRIP="strip" ; STRIP_PARAMS="" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; *-apple-darwin) STRIP_PARAMS="-x" ;; esac;
           echo set-output name=STRIP::${STRIP}
           echo ::set-output name=STRIP::${STRIP}
+          echo set-output name=STRIP_PARAMS::${STRIP_PARAMS}
+          echo ::set-output name=STRIP_PARAMS::${STRIP_PARAMS}
       - name: Create all needed build/work directories
         shell: bash
         run: |
@@ -207,7 +209,7 @@ jobs:
           # binary
           cp 'target/${{ matrix.job.target }}/release/${{ steps.vars.outputs.LIB_FNAME }}' '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
           # `strip` binary (if needed)
-          if [ -n "${{ steps.vars.outputs.STRIP }}" ]; then "${{ steps.vars.outputs.STRIP }}" '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/${{ steps.vars.outputs.LIB_FNAME }}' ; fi
+          if [ -n "${{ steps.vars.outputs.STRIP }}" ]; then "${{ steps.vars.outputs.STRIP }}" ${{ steps.vars.outputs.STRIP_PARAMS }} '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/${{ steps.vars.outputs.LIB_FNAME }}' ; fi
           # README and LICENSE
           cp README.md '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
           cp LICENSE '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
