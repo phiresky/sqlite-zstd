@@ -4,11 +4,12 @@ name: CICD
 
 env:
   PROJECT_NAME: sqlite_zstd
-  #PROJECT_DESC: "sqlite ♥ zstd"
-  #PROJECT_AUTH: "bootandy"
-  #RUST_MIN_SRV: "1.31.0"
-
-on: [push, pull_request]
+on:
+  push:
+    branches: 
+      - main
+      - master
+  pull_request:
 
 jobs:
   style:
@@ -65,21 +66,15 @@ jobs:
           # { os, target, cargo-options, features, use-cross, toolchain }
           - {
               os: ubuntu-latest,
+              target: x86_64-unknown-linux-gnu,
+              features: build_extension,
+            }
+          - {
+              os: ubuntu-latest,
               target: arm-unknown-linux-gnueabihf,
               use-cross: use-cross,
               features: build_extension,
             }
-          - {
-              os: ubuntu-18.04,
-              target: x86_64-unknown-linux-gnu,
-              use-cross: use-cross,
-              features: build_extension,
-            }
-          #- {
-          #      os: ubuntu-18.04,
-          #      target: x86_64-unknown-linux-musl,
-          #      use-cross: use-cross,
-          #  }
           - {
               os: macos-latest,
               target: x86_64-apple-darwin,
@@ -171,9 +166,11 @@ jobs:
           echo set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS:-<empty>/false}
           echo ::set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS}
           # * strip executable?
-          STRIP="strip" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; esac;
+          STRIP="strip" ; STRIP_PARAMS="" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; *-apple-darwin) STRIP_PARAMS="-x" ;; esac;
           echo set-output name=STRIP::${STRIP}
           echo ::set-output name=STRIP::${STRIP}
+          echo set-output name=STRIP_PARAMS::${STRIP_PARAMS}
+          echo ::set-output name=STRIP_PARAMS::${STRIP_PARAMS}
       - name: Create all needed build/work directories
         shell: bash
         run: |
@@ -212,7 +209,7 @@ jobs:
           # binary
           cp 'target/${{ matrix.job.target }}/release/${{ steps.vars.outputs.LIB_FNAME }}' '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
           # `strip` binary (if needed)
-          if [ -n "${{ steps.vars.outputs.STRIP }}" ]; then "${{ steps.vars.outputs.STRIP }}" '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/${{ steps.vars.outputs.LIB_FNAME }}' ; fi
+          if [ -n "${{ steps.vars.outputs.STRIP }}" ]; then "${{ steps.vars.outputs.STRIP }}" ${{ steps.vars.outputs.STRIP_PARAMS }} '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/${{ steps.vars.outputs.LIB_FNAME }}' ; fi
           # README and LICENSE
           cp README.md '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'
           cp LICENSE '${{ steps.vars.outputs.STAGING }}/${{ steps.vars.outputs.PKG_BASENAME }}/'

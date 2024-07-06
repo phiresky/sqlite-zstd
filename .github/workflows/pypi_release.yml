@@ -1,39 +1,44 @@
 name: Publish to PyPI
 
 on:
-  push:
+  workflow_dispatch: 
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }} for ${{ matrix.cibw_python }} on ${{ matrix.cibw_arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-20.04, windows-2019, macos-11]
+        os: [ubuntu-latest]
+        cibw_arch: ["x86_64", "aarch64"]
     env:
       CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y"
       CIBW_BUILD_VERBOSITY: "1"
-      CIBW_SKIP: cp39-musllinux_i686 cp310-musllinux_i686 cp311-musllinux_i686 cp312-musllinux_i686 # Can't install Rust on musl based Linux systems
       CIBW_ENVIRONMENT: 'PATH="$PATH:$HOME/.cargo/bin"'
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up QEMU
-        if: runner.os == 'Linux'
-        uses: docker/setup-qemu-action@v1
+        if: matrix.os == 'ubuntu-latest' && matrix.cibw_arch == 'aarch64'
+        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3  # v3.0.0
         with:
-          platforms: all
+          platforms: arm64
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.2
+        env:
+          CIBW_BUILD_VERBOSITY: 1
+          CIBW_BUILD: ${{ matrix.cibw_python }}
+          CIBW_ARCHS: ${{ matrix.cibw_arch }}
+          CIBW_TEST_SKIP: "*universal2:arm64"
         with:
             package-dir: ./python
             output-dir: ./python/wheelhouse
 
       - uses: actions/upload-artifact@v3
         with:
-          name: wheel-${{ runner.os }}
+          name: dist
           path: ./python/wheelhouse/*.whl
 
   build_sdist:
@@ -51,7 +56,7 @@ jobs:
       - uses: actions/setup-python@v2
         name: Install Python
         with:
-          python-version: "3.9"
+          python-version: "3.12"
 
       - name: Build sdist
         run: |
@@ -61,20 +66,21 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
-          name: sdist-${{ runner.os }}
-          path: python/dist/*.tar.gz
+          name: dist
+          path: python/dist/*.tar.*
   
-#   release:
-#     needs: [build_wheels, build_sdist]
-#     runs-on: ubuntu-latest
-#     steps:
-#       - uses: actions/download-artifact@v2
-#         with:
-#           name: artifact
-#           path: python/dist
+  release:
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: dist
+          path: python/dist/
 
-#       - uses: pypa/gh-action-pypi-publish@release/v1
-#         with:
-#           packages-dir: python/dist/
-#           user: __token__
-#           password: ${{ secrets.PYPI_API_TOKEN }}
+      - uses: pypa/gh-action-pypi-publish@v1.8.10
+        with:
+          repository-url: https://pypi.org/project/sqlite-zstd-build
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: python/dist

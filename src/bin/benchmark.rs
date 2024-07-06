@@ -76,13 +76,13 @@ impl Bench for SelectBench {
     }
     fn execute(&self, conn: &Connection) -> Result<i64> {
         let mut stmt = conn.prepare("select data from title_basics where id = ?")?;
-        let mut total_len = 0;
+        let mut _total_len = 0;
         for id in &self.ids {
             let data: String = stmt.query_row(params![id], |r| r.get(0))?;
-            total_len += data.len();
+            _total_len += data.len();
         }
 
-        // eprintln!("total bytes got: {}", total_len);
+        // eprintln!("total bytes got: {}", _total_len);
         Ok(self.ids.len() as i64)
     }
 }
@@ -213,7 +213,7 @@ fn main() -> Result<()> {
             .map(|preparer| {
                 eprintln!("running preparer {its_per_bench} times");
                 (0..its_per_bench)
-                    .map(|i| preparer(&db1))
+                    .map(|_i| preparer(&db1))
                     .collect::<Result<_, _>>()
                     .context("preparing benches")
             })
@@ -237,7 +237,7 @@ fn main() -> Result<()> {
                 let db_path = Path::new(&location).join(file_name);
                 if !db_path.exists() {
                     eprintln!("copying {} -> {}", input_db, db_path.to_string_lossy());
-                    std::fs::copy(&input_db, &db_path)?;
+                    std::fs::copy(input_db, &db_path)?;
                 } else {
                     eprintln!(
                         "{} already exists, assuming it's the same",
