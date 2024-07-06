@@ -1,5 +1,7 @@
 #![warn(clippy::print_stdout)]
 
+pub extern crate rusqlite;
+
 use rusqlite::Connection;
 use util::init_logging;
 
