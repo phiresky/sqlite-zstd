@@ -5,16 +5,13 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }} for ${{ matrix.cibw_python }} on ${{ matrix.cibw_arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest]
-        #cibw_arch: ["x86_64", "aarch64"]
-        #cibw_python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
-        cibw_arch: ["aarch64"]
-        cibw_python: ["cp311-*", "cp312-*"]
-        
+        cibw_arch: ["x86_64", "aarch64"]
+        cibw_python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
     env:
       CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y"
       CIBW_BUILD_VERBOSITY: "1"
