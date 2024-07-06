@@ -11,11 +11,9 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         cibw_arch: ["x86_64", "aarch64"]
-        cibw_python: ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
     env:
       CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y"
       CIBW_BUILD_VERBOSITY: "1"
-      CIBW_SKIP: cp39-musllinux_i686 cp310-musllinux_i686 cp311-musllinux_i686 cp312-musllinux_i686 # Can't install Rust on musl based Linux systems
       CIBW_ENVIRONMENT: 'PATH="$PATH:$HOME/.cargo/bin"'
 
     steps:
@@ -40,7 +38,7 @@ jobs:
 
       - uses: actions/upload-artifact@v3
         with:
-          name: wheel-${{ runner.os }}
+          name: dist
           path: ./python/wheelhouse/*.whl
 
   build_sdist:
@@ -68,19 +66,21 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
-          name: sdist-${{ runner.os }}
-          path: dist/*.tar.*
+          name: dist
+          path: python/dist/*.tar.*
   
   release:
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v2
+      - uses: actions/download-artifact@v3
         with:
           name: dist
-          path: dist/
+          path: python/dist/
 
       - uses: pypa/gh-action-pypi-publish@v1.8.10
         with:
+          repository-url: https://pypi.org/project/sqlite-zstd-build
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: python/dist/*

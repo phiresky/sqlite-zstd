@@ -166,7 +166,7 @@ jobs:
           echo set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS:-<empty>/false}
           echo ::set-output name=CARGO_USE_CROSS::${CARGO_USE_CROSS}
           # * strip executable?
-          STRIP="strip" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; esac;
+          STRIP="strip" ; case ${{ matrix.job.target }} in arm-unknown-linux-gnueabihf) STRIP="arm-linux-gnueabihf-strip" ;; *-pc-windows-msvc) STRIP="" ;; *-apple-darwin) STRIP="strip -sX" ;; esac;
           echo set-output name=STRIP::${STRIP}
           echo ::set-output name=STRIP::${STRIP}
       - name: Create all needed build/work directories
