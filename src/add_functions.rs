@@ -198,7 +198,7 @@ pub mod tests {
     }
 
     fn test_strings() -> anyhow::Result<Vec<String>> {
-        let data = vec![
+        let data = [
             "hello this is a test",
             "foobar",
             "looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong",
