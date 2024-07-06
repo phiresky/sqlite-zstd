@@ -83,4 +83,4 @@ jobs:
           repository-url: https://pypi.org/project/sqlite-zstd-build
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: python/dist/*
+          packages-dir: python/dist
