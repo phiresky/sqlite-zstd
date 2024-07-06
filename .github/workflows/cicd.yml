@@ -4,11 +4,12 @@ name: CICD
 
 env:
   PROJECT_NAME: sqlite_zstd
-  #PROJECT_DESC: "sqlite ♥ zstd"
-  #PROJECT_AUTH: "bootandy"
-  #RUST_MIN_SRV: "1.31.0"
-
-on: [push, pull_request]
+on:
+  push:
+    branches: 
+      - main
+      - master
+  pull_request:
 
 jobs:
   style:
@@ -65,21 +66,15 @@ jobs:
           # { os, target, cargo-options, features, use-cross, toolchain }
           - {
               os: ubuntu-latest,
+              target: x86_64-unknown-linux-gnu,
+              features: build_extension,
+            }
+          - {
+              os: ubuntu-latest,
               target: arm-unknown-linux-gnueabihf,
               use-cross: use-cross,
               features: build_extension,
             }
-          - {
-              os: ubuntu-18.04,
-              target: x86_64-unknown-linux-gnu,
-              use-cross: use-cross,
-              features: build_extension,
-            }
-          #- {
-          #      os: ubuntu-18.04,
-          #      target: x86_64-unknown-linux-musl,
-          #      use-cross: use-cross,
-          #  }
           - {
               os: macos-latest,
               target: x86_64-apple-darwin,
