@@ -22,8 +22,10 @@ pub fn encoder_dict_from_ctx(
     use lru_time_cache::LruCache;
     // we cache the instantiated encoder dictionaries keyed by (DbConnection, dict_id, compression_level)
     // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
+    type CacheKey = (usize, i32, i32, String);
+    type EncoderDictionaryCache = LruCache<CacheKey, Arc<EncoderDictionary<'static>>>;
     lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<(usize, i32, i32, String), Arc<EncoderDictionary<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
+        static ref DICTS: RwLock<EncoderDictionaryCache> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
     }
     let id: i32 = ctx.get(arg_index)?;
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
