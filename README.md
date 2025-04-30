@@ -104,9 +104,9 @@ Note that a compression VFS such as https://github.com/mlin/sqlite_zstd_vfs migh
 
 - `zstd_train_dict(agg, dict_size: int, sample_count: int) -> blob`
 
-  Aggregate function (like sum() or count()) to train a zstd dictionary on sample_count samples of the given aggregate data
+  Aggregate function (like sum() or count()) to train a zstd dictionary on randomly selected sample_count samples of the given aggregate data
 
-  Example use: `select zstd_train_dict(tbl.data, 100000, 1000) from tbl` will return a dictionary of size 100kB trained on 1000 samples in `tbl`
+  Example use: `select zstd_train_dict(tbl.data, 100000, 1000) from tbl` will return a dictionary of size 100kB trained on 1000 random samples in `tbl`
 
   The recommended number of samples is 100x the target dictionary size. As an example, you can train a dict of 100kB with the "optimal" sample count as follows:
 
