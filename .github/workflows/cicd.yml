@@ -4,12 +4,7 @@ name: CICD
 
 env:
   PROJECT_NAME: sqlite_zstd
-on:
-  push:
-    branches: 
-      - main
-      - master
-  pull_request:
+on: [push, pull_request]
 
 jobs:
   style:
