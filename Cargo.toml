@@ -1,7 +1,7 @@
 [package]
 authors = ["phiresky <phireskyde+git@gmail.com>"]
 description = "Extension for sqlite that provides transparent dictionary-based row-level compression for sqlite"
-edition = "2018"
+edition = "2024"
 license = "LGPL-2.0-or-later"
 name = "sqlite-zstd"
 repository = "https://github.com/phiresky/sqlite-zstd"

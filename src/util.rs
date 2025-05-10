@@ -19,7 +19,7 @@ pub fn ensure_dicts_table_exists(db: &rusqlite::Connection) -> rusqlite::Result<
 #[doc(hidden)]
 #[macro_export]
 macro_rules! format_sqlite {
-    ($x:expr, $($y:expr),*) => {
+    ($x:expr_2021, $($y:expr_2021),*) => {
         format!($x, $(escape_sqlite_identifier($y),)*)
     };
 }
@@ -70,7 +70,8 @@ pub fn escape_sqlite_identifier(identifier: &str) -> String {
 
 pub fn init_logging(default_level: LevelFilter) {
     if std::env::var("SQLITE_ZSTD_LOG").is_err() {
-        std::env::set_var("SQLITE_ZSTD_LOG", format!("{}", default_level));
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("SQLITE_ZSTD_LOG", format!("{}", default_level)) };
     }
     env_logger::try_init_from_env(env_logger::Env::new().filter("SQLITE_ZSTD_LOG")).ok();
 }

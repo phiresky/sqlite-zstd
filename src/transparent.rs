@@ -1014,7 +1014,8 @@ mod tests {
 
     fn get_two_dbs(seed: Option<u64>) -> anyhow::Result<(Connection, Connection)> {
         if std::env::var("RUST_LOG").is_err() {
-            std::env::set_var("RUST_LOG", "info");
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("RUST_LOG", "info") };
         }
         env_logger::try_init().ok();
 
