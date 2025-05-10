@@ -5,7 +5,7 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }} for ${{ matrix.cibw_python }} on ${{ matrix.cibw_arch }}
+    name: Build wheels on ${{ matrix.os }} for ${{ matrix.cibw_arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -29,7 +29,6 @@ jobs:
         uses: pypa/cibuildwheel@v2.16.2
         env:
           CIBW_BUILD_VERBOSITY: 1
-          CIBW_BUILD: ${{ matrix.cibw_python }}
           CIBW_ARCHS: ${{ matrix.cibw_arch }}
           CIBW_TEST_SKIP: "*universal2:arm64"
         with:
@@ -80,7 +79,6 @@ jobs:
 
       - uses: pypa/gh-action-pypi-publish@v1.8.10
         with:
-          repository-url: https://pypi.org/project/sqlite-zstd-build
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: python/dist
