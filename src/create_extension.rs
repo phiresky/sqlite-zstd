@@ -1,19 +1,17 @@
 // https://www.sqlite.org/loadext.html
 // https://github.com/jgallagher/rusqlite/issues/524#issuecomment-507787350
 
+use rusqlite::Connection;
 use rusqlite::ffi;
 use std::os::raw::c_int;
 
-#[no_mangle]
+#[expect(clippy::not_unsafe_ptr_arg_deref)]
+#[unsafe(no_mangle)]
 pub extern "C" fn sqlite3_sqlitezstd_init(
     db: *mut ffi::sqlite3,
-    _pz_err_msg: &mut &mut std::os::raw::c_char,
+    pz_err_msg: *mut *mut std::os::raw::c_char,
     p_api: *mut ffi::sqlite3_api_routines,
 ) -> c_int {
-    // SQLITE_EXTENSION_INIT2 equivalent
-    unsafe {
-        ffi::sqlite3_api = p_api;
-    }
     /* Insert here calls to
      **     sqlite3_create_function_v2(),
      **     sqlite3_create_collation_v2(),
@@ -21,21 +19,18 @@ pub extern "C" fn sqlite3_sqlitezstd_init(
      **     sqlite3_vfs_register()
      ** to register the new features that your extension adds.
      */
-    match init(db) {
+    unsafe { Connection::extension_init2(db, pz_err_msg, p_api, init) }
+}
+
+fn init(db: Connection) -> rusqlite::Result<bool> {
+    match crate::load(&db) {
         Ok(()) => {
             log::info!("[sqlite-zstd] initialized");
-            ffi::SQLITE_OK
+            Ok(false)
         }
         Err(e) => {
             log::error!("[sqlite-zstd] init error: {:?}", e);
-            ffi::SQLITE_ERROR
+            Err(rusqlite::Error::ModuleError(format!("{:?}", e)))
         }
     }
-}
-
-fn init(db_handle: *mut ffi::sqlite3) -> anyhow::Result<()> {
-    let db = unsafe { rusqlite::Connection::from_handle(db_handle)? };
-
-    crate::load(&db)?;
-    Ok(())
 }

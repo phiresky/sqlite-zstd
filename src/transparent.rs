@@ -1,9 +1,9 @@
 use crate::{util::*, *};
 use anyhow::Context as AContext;
+use rusqlite::OptionalExtension;
 use rusqlite::functions::Context;
 use rusqlite::types::ToSqlOutput;
 use rusqlite::types::Value;
-use rusqlite::OptionalExtension;
 use rusqlite::{named_params, params};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -267,7 +267,10 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         .find(|e| &e.name == column_name)
         .with_context(|| format!("Column {} does not exist in {}", column_name, table_name))?;
     if to_compress_column.is_primary_key {
-        anyhow::bail!("Can't compress column {} since it is part of primary key (this could probably be supported, but currently isn't)", column_name);
+        anyhow::bail!(
+            "Can't compress column {} since it is part of primary key (this could probably be supported, but currently isn't)",
+            column_name
+        );
     }
 
     check_columns_to_compress_are_not_indexed(&db, &columns_info, table_name)?;
@@ -421,7 +424,10 @@ fn check_columns_to_compress_are_not_indexed(
             .map(|c| format!("{} ({})", c.name, indexed_columns.get(&c.name).unwrap()))
             .collect::<Vec<String>>()
             .join(", ");
-        anyhow::bail!("Can't compress column(s): {} - used as part of index (this could probably be supported, but currently isn't)", columns_indices);
+        anyhow::bail!(
+            "Can't compress column(s): {} - used as part of index (this could probably be supported, but currently isn't)",
+            columns_indices
+        );
     };
     Ok(())
 }
@@ -932,13 +938,13 @@ fn get_or_train_dict(
 
             if dict_target_size < config.min_dict_size_bytes_for_training {
                 log::debug!(
-                "Dictionary for group '{}' would be smaller than minimum ({} * {:.3} = {} < {}), ignoring",
-                dict_choice,
-                pretty_bytes(todo.total_bytes),
-                config.dict_size_ratio,
-                pretty_bytes(dict_target_size),
-                pretty_bytes(config.min_dict_size_bytes_for_training)
-            );
+                    "Dictionary for group '{}' would be smaller than minimum ({} * {:.3} = {} < {}), ignoring",
+                    dict_choice,
+                    pretty_bytes(todo.total_bytes),
+                    config.dict_size_ratio,
+                    pretty_bytes(dict_target_size),
+                    pretty_bytes(config.min_dict_size_bytes_for_training)
+                );
                 return Ok(TrainDictReturn::Skip);
             }
             let target_samples = (dict_target_size as f32 * config.train_dict_samples_ratio
@@ -973,7 +979,7 @@ mod tests {
     use rusqlite::{Connection, Row};
 
     fn row_to_thong(r: &Row) -> anyhow::Result<Vec<Value>> {
-        Ok((0..r.column_count())
+        Ok((0..r.as_ref().column_count())
             .map(|i| r.get_ref(i).map(|e| e.into()))
             .collect::<Result<_, _>>()?)
     }

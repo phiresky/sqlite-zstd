@@ -128,7 +128,9 @@ pub(crate) fn zstd_decompress_fn<'a>(
         }
     }
 
-    let output_text: bool = ctx.get(arg_output_text).context("output_text arg")?;
+    let output_text: bool = ctx
+        .get(arg_output_text)
+        .context("output_text arg invalid")?;
 
     let input_value = match ctx.get_raw(arg_data) {
         ValueRef::Blob(b) => b,
