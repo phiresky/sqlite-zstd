@@ -1,10 +1,38 @@
 use anyhow::Context as AContext;
+use lru_time_cache::LruCache;
+use rusqlite::Connection;
 use rusqlite::{functions::Context, params};
-use std::sync::{Arc, RwLock};
+use std::sync::LazyLock;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zstd::dict::{DecoderDictionary, EncoderDictionary};
 
+// we cache the instantiated encoder dictionaries keyed by (DbConnection, dict_id, compression_level)
+// DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
+// we use a Mutex and not a RwLock because even the .get() methods on LruCache need to write (to update expiry and least recently used time)
+static ENCODER_DICTS: LazyLock<
+    Mutex<LruCache<(usize, i32, i32), Arc<EncoderDictionary<'static>>>>,
+> = LazyLock::new(|| Mutex::new(LruCache::with_expiry_duration(Duration::from_secs(10))));
+
+static DECODER_DICTS: LazyLock<Mutex<LruCache<(usize, i32), Arc<DecoderDictionary<'static>>>>> =
+    LazyLock::new(|| Mutex::new(LruCache::with_expiry_duration(Duration::from_secs(10))));
+
+/// when we open a new connection, it may reuse the same pointer location as an old connection, so we need to invalidate parts of the dict cache
+pub(crate) fn invalidate_caches(_db: &Connection) {
+    // (theoretically we only need to clear caches with key db_handle_pointer but it likely doesn't matter much,
+    // how often are you going to open a new connection?)
+    // let db_handle_pointer = unsafe { db.handle() } as usize;
+    log::debug!("Invalidating dict caches");
+    {
+        let mut cache = ENCODER_DICTS.lock().unwrap();
+        cache.clear();
+    }
+    {
+        let mut cache = DECODER_DICTS.lock().unwrap();
+        cache.clear();
+    }
+}
 // TODO: the rust interface currently requires a level when preparing a dictionary, but the zstd interface (ZSTD_CCtx_loadDictionary) does not.
 // TODO: Using LruCache here isn't very smart
 pub fn encoder_dict_from_ctx(
@@ -12,17 +40,11 @@ pub fn encoder_dict_from_ctx(
     arg_index: usize,
     level: i32,
 ) -> anyhow::Result<Arc<EncoderDictionary<'static>>> {
-    use lru_time_cache::LruCache;
-    // we cache the instantiated encoder dictionaries keyed by (DbConnection, dict_id, compression_level)
-    // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
-    lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<(usize, i32, i32), Arc<EncoderDictionary<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
-    }
     let id: i32 = ctx.get(arg_index)?;
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
     let db_handle_pointer = unsafe { db.handle() } as usize; // SAFETY: We're only getting the pointer as an int, not using the raw connection
 
-    let mut dicts_write = DICTS.write().unwrap();
+    let mut dicts_write = ENCODER_DICTS.lock().unwrap();
     let entry = dicts_write.entry((db_handle_pointer, id, level));
     let res = match entry {
         lru_time_cache::Entry::Vacant(e) => e.insert({
@@ -52,17 +74,17 @@ pub fn decoder_dict_from_ctx(
     ctx: &Context,
     arg_index: usize,
 ) -> anyhow::Result<Arc<DecoderDictionary<'static>>> {
-    use lru_time_cache::LruCache;
     // we cache the instantiated decoder dictionaries keyed by (DbConnection, dict_id)
     // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
-    lazy_static::lazy_static! {
-        static ref DICTS: RwLock<LruCache<(usize, i32), Arc<DecoderDictionary<'static>>>> = RwLock::new(LruCache::with_expiry_duration(Duration::from_secs(10)));
-    }
     let id: i32 = ctx.get(arg_index)?;
     let db = unsafe { ctx.get_connection()? }; // SAFETY: This might be unsafe depending on how the connection is used. See https://github.com/rusqlite/rusqlite/issues/643#issuecomment-640181213
     let db_handle_pointer = unsafe { db.handle() } as usize; // SAFETY: We're only getting the pointer as an int, not using the raw connection
-    let mut dicts_write = DICTS.write().unwrap();
-    let entry = dicts_write.entry((db_handle_pointer, id));
+    log::trace!("Using DB Handle pointer {db_handle_pointer} as cache key");
+    let cache_key = (db_handle_pointer, id);
+    // since the get() function on lru cache also writes (updates last used time and expiry),
+    // we can not use DICTS.read() (RwLock) for perf
+    let mut dicts_write = DECODER_DICTS.lock().unwrap();
+    let entry = dicts_write.entry(cache_key);
     let res = match entry {
         lru_time_cache::Entry::Vacant(e) => e.insert({
             log::debug!(
