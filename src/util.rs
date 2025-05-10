@@ -25,7 +25,7 @@ macro_rules! format_sqlite {
 }
 
 pub fn ah(e: anyhow::Error) -> rusqlite::Error {
-    rusqlite::Error::UserFunctionError(format!("{:?}", e).into())
+    rusqlite::Error::UserFunctionError(format!("{e:?}").into())
 }
 
 /*pub fn debug_row(r: &rusqlite::Row) {
@@ -61,17 +61,10 @@ pub fn escape_sqlite_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
 }
 
-/**
- * this is needed sometimes because _parameters are not allowed in views_, so using prepared statements is not possible :/
- */
-/*pub fn escape_sqlite_string(string: &str) -> String {
-    format!("'{}'", string.replace("'", "''"))
-}*/
-
 pub fn init_logging(default_level: LevelFilter) {
     if std::env::var("SQLITE_ZSTD_LOG").is_err() {
         // TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("SQLITE_ZSTD_LOG", format!("{}", default_level)) };
+        unsafe { std::env::set_var("SQLITE_ZSTD_LOG", format!("{default_level}")) };
     }
     env_logger::try_init_from_env(env_logger::Env::new().filter("SQLITE_ZSTD_LOG")).ok();
 }

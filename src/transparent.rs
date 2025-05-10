@@ -54,20 +54,20 @@ pub struct TransparentCompressConfig {
     /// Examples:
     ///
     /// * `'a'`
-    ///     This will cause a single dictionary to be trained for everything.
+    ///   This will cause a single dictionary to be trained for everything.
     ///
     /// * `strftime(created, '%Y-%m')`
-    ///     This will cause every month of data to be compressed with its own dictionary.
+    ///   This will cause every month of data to be compressed with its own dictionary.
     ///
     /// * `nullif(strftime(created, '%Y-%m'), strftime('now', '%Y-%m'))`
     ///
-    ///     The same as above, but if the entry is from the current month it will stay uncompressed.
-    ///     This is handy because it means that the dictionary for the month will only be created when the month is over
-    ///     and can thus be optimized the most for the given data
+    ///   The same as above, but if the entry is from the current month it will stay uncompressed.
+    ///   This is handy because it means that the dictionary for the month will only be created when the month is over
+    ///   and can thus be optimized the most for the given data
     /// * `case when date(timestamp, ''weekday 0'') < date(''now'', ''weekday 0'') then data_type || ''.'' || date(timestamp, ''weekday 0'') else null end`
     ///
-    ///     This one uses keys like data_type.2020-11-01` where the date is the first day of the week, except for the current week which stays uncompressed.
-    ///     This means that every different data_type will be compressed separately and separately for each week.
+    ///   This one uses keys like data_type.2020-11-01` where the date is the first day of the week, except for the current week which stays uncompressed.
+    ///   This means that every different data_type will be compressed separately and separately for each week.
     ///
     /// You can return the special string `[nodict]` to compress the given data without a dictionary.
     /// Note that the compression key is global for all tables. So if you want your dict to only apply to this table return
@@ -97,7 +97,7 @@ pub fn pretty_bytes(bytes: i64) -> String {
     } else if bytes >= 1_000 {
         format!("{:.2}kB", bytes as f64 / 1e3)
     } else {
-        format!("{}B", bytes)
+        format!("{bytes}B")
     }
 }
 
@@ -161,13 +161,13 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
 
     let config_str: String = ctx.get(arg_config)?;
     let config: TransparentCompressConfig = serde_json::from_str(&config_str)
-        .with_context(|| format!("parsing json config '{}'", config_str))?;
+        .with_context(|| format!("parsing json config '{config_str}'"))?;
     let db = &mut unsafe { ctx.get_connection()? };
     let db = db
         .unchecked_transaction()
         .context("Could not start transaction")?;
     let table_name = &config.table;
-    let new_table_name = format!("_{}_zstd", table_name);
+    let new_table_name = format!("_{table_name}_zstd");
 
     let configs = get_configs(&db)?;
     let already_compressed_columns = configs
@@ -265,7 +265,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
     let to_compress_column = columns_info
         .iter()
         .find(|e| &e.name == column_name)
-        .with_context(|| format!("Column {} does not exist in {}", column_name, table_name))?;
+        .with_context(|| format!("Column {column_name} does not exist in {table_name}"))?;
     if to_compress_column.is_primary_key {
         anyhow::bail!(
             "Can't compress column {} since it is part of primary key (this could probably be supported, but currently isn't)",
@@ -287,7 +287,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         // small sanity check of chooser statement
         db.query_row(&query, params![], |row| row.get::<_, String>(0))
             .optional()
-            .with_context(|| format!("Tried to execute:\n{}", query))
+            .with_context(|| format!("Tried to execute:\n{query}"))
             .context(r#"Dict chooser expression does not seem to be valid. Make sure you return a string and get your escaping right: If you want an sqlite string inside a json string inside a sqlite string you need to do '{"foo": "''bar''"}'"#)?;
     }
     {
@@ -376,7 +376,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
 }
 
 fn get_dict_id(column_name: &str) -> String {
-    format!("_{}_dict", column_name)
+    format!("_{column_name}_dict")
 }
 
 fn check_table_exists(db: &rusqlite::Connection, table_name: &str) -> bool {
@@ -496,7 +496,7 @@ fn create_insert_trigger(
     internal_table_name: &str,
     _config: &TransparentCompressConfig,
 ) -> anyhow::Result<()> {
-    let trigger_name = format!("{}_insert_trigger", table_name);
+    let trigger_name = format!("{table_name}_insert_trigger");
 
     // expressions that map backing table columns to view columns
     let mut insert_selection = vec![];
@@ -549,7 +549,7 @@ fn create_delete_trigger(
     internal_table_name: &str,
     primary_key_condition: &str,
 ) -> anyhow::Result<()> {
-    let trigger_name = format!("{}_delete_trigger", table_name);
+    let trigger_name = format!("{table_name}_delete_trigger");
 
     let deletetrigger_query = format!(
         "
@@ -839,7 +839,7 @@ fn maintenance_for_todo(
                     ":compact": COMPACT
                 },
             )
-            .with_context(|| format!("while compressing chunk for key {}", dict_choice))?;
+            .with_context(|| format!("while compressing chunk for key {dict_choice}"))?;
 
         total_updated += updated as i64;
         log::debug!("Compressed {} / {}", total_updated, todo.count);
@@ -985,7 +985,7 @@ mod tests {
     }
 
     fn get_whole_table(db: &Connection, tbl_name: &str) -> anyhow::Result<Vec<Vec<Value>>> {
-        let mut stmt = db.prepare(&format!("select * from {} ORDER BY id", tbl_name))?;
+        let mut stmt = db.prepare(&format!("select * from {tbl_name} ORDER BY id"))?;
         let q1: Vec<Vec<Value>> = stmt
             .query_map(params![], |e| row_to_thong(e).map_err(ah))?
             .collect::<Result<_, rusqlite::Error>>()?;

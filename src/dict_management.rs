@@ -8,14 +8,15 @@ use std::time::Duration;
 
 use zstd::dict::{DecoderDictionary, EncoderDictionary};
 
+type EncoderCache = LruCache<(usize, i32, i32), Arc<EncoderDictionary<'static>>>;
 // we cache the instantiated encoder dictionaries keyed by (DbConnection, dict_id, compression_level)
 // DbConnection would ideally be db.path() because it's the same for multiple connections to the same db, but that would be less robust (e.g. in-memory databases)
 // we use a Mutex and not a RwLock because even the .get() methods on LruCache need to write (to update expiry and least recently used time)
-static ENCODER_DICTS: LazyLock<
-    Mutex<LruCache<(usize, i32, i32), Arc<EncoderDictionary<'static>>>>,
-> = LazyLock::new(|| Mutex::new(LruCache::with_expiry_duration(Duration::from_secs(10))));
+static ENCODER_DICTS: LazyLock<Mutex<EncoderCache>> =
+    LazyLock::new(|| Mutex::new(LruCache::with_expiry_duration(Duration::from_secs(10))));
 
-static DECODER_DICTS: LazyLock<Mutex<LruCache<(usize, i32), Arc<DecoderDictionary<'static>>>>> =
+type DecoderCache = LruCache<(usize, i32), Arc<DecoderDictionary<'static>>>;
+static DECODER_DICTS: LazyLock<Mutex<DecoderCache>> =
     LazyLock::new(|| Mutex::new(LruCache::with_expiry_duration(Duration::from_secs(10))));
 
 /// when we open a new connection, it may reuse the same pointer location as an old connection, so we need to invalidate parts of the dict cache
@@ -60,7 +61,7 @@ pub fn encoder_dict_from_ctx(
                     params![id],
                     |r| r.get(0),
                 )
-                .with_context(|| format!("getting dict with id={} from _zstd_dicts", id))?;
+                .with_context(|| format!("getting dict with id={id} from _zstd_dicts"))?;
             let dict = EncoderDictionary::copy(&dict_raw, level);
             Arc::new(dict)
         }),
@@ -98,7 +99,7 @@ pub fn decoder_dict_from_ctx(
                     params![id],
                     |r| r.get(0),
                 )
-                .with_context(|| format!("getting dict with id={} from _zstd_dicts", id))?;
+                .with_context(|| format!("getting dict with id={id} from _zstd_dicts"))?;
             let dict = DecoderDictionary::copy(&dict_raw);
             Arc::new(dict)
         }),
