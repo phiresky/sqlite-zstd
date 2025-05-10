@@ -3,7 +3,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use rand::seq::SliceRandom;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 use std::path::{Path, PathBuf};
 use std::{io::Write, time::Instant};
 use structopt::StructOpt;

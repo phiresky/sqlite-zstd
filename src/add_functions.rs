@@ -60,7 +60,7 @@ pub mod tests {
     use chrono::TimeZone;
     pub use pretty_assertions::assert_eq;
 
-    use rusqlite::{params, Connection};
+    use rusqlite::{Connection, params};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
 
