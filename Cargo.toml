@@ -29,10 +29,10 @@ name = "create_test_db"
 required-features = ["benchmark"]
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
-zstd = {version = "0.11.2", features = ["experimental"]}
+zstd = {version = "0.13.1", features = ["experimental"]}
 #zstd = {version = "0.5.3", path="../zstd-rs"}
 #zstd = {version = "=0.5.4"}
 anyhow = "1.0.44"
@@ -53,6 +53,11 @@ structopt = {version = "0.3.23", optional = true}
 features = ["functions", "blob", "bundled", "array"]
 package = "rusqlite"
 version = "0.35.0"
+
+[patch.crates-io.rusqlite]
+features = ["functions", "blob", "bundled", "array"]
+git = "https://github.com/rusqlite/rusqlite.git"
+tag = "v0.31.0"
 
 [dev-dependencies]
 chrono = "0.4.19"
