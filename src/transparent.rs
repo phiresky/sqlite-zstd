@@ -195,7 +195,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             r#"select "from"
             from pragma_foreign_key_list('{}')
             where "table" = '_zstd_dicts'"#,
-            &new_table_name
+            new_table_name
         );
         log::debug!("dict_id_columns query {:?}", query);
         db.prepare(&query)?
@@ -332,7 +332,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         db.execute(
             &format_sqlite!(
                 "create index {} on {} ({})",
-                &format!("{}_idx", &dict_id_column_name),
+                &format!("{}_idx", dict_id_column_name),
                 &new_table_name,
                 &dict_id_column_name
             ),
@@ -461,9 +461,9 @@ fn create_or_replace_view(
                 Ok(format!(
                     // prepared statement parameters not allowed in view
                     "zstd_decompress_col({}, {}, {}, {}) as {0}",
-                    &escape_sqlite_identifier(&c.name),
+                    escape_sqlite_identifier(&c.name),
                     if affinity_is_text { 1 } else { 0 },
-                    &escape_sqlite_identifier(&get_dict_id(&c.name)),
+                    escape_sqlite_identifier(&get_dict_id(&c.name)),
                     COMPACT
                 ))
             } else {
