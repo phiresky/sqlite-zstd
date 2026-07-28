@@ -195,7 +195,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
             r#"select "from"
             from pragma_foreign_key_list('{}')
             where "table" = '_zstd_dicts'"#,
-            &new_table_name
+            new_table_name
         );
         log::debug!("dict_id_columns query {:?}", query);
         db.prepare(&query)?
@@ -332,7 +332,7 @@ pub fn zstd_enable_transparent<'a>(ctx: &Context) -> anyhow::Result<ToSqlOutput<
         db.execute(
             &format_sqlite!(
                 "create index {} on {} ({})",
-                &format!("{}_idx", &dict_id_column_name),
+                &format!("{}_idx", dict_id_column_name),
                 &new_table_name,
                 &dict_id_column_name
             ),
@@ -461,9 +461,9 @@ fn create_or_replace_view(
                 Ok(format!(
                     // prepared statement parameters not allowed in view
                     "zstd_decompress_col({}, {}, {}, {}) as {0}",
-                    &escape_sqlite_identifier(&c.name),
+                    escape_sqlite_identifier(&c.name),
                     if affinity_is_text { 1 } else { 0 },
-                    &escape_sqlite_identifier(&get_dict_id(&c.name)),
+                    escape_sqlite_identifier(&get_dict_id(&c.name)),
                     COMPACT
                 ))
             } else {
@@ -807,7 +807,9 @@ fn maintenance_for_todo(
         };
 
     let mut total_updated: i64 = 0;
-    let mut chunk_size = config.incremental_compression_step_bytes / avg_sample_bytes;
+    // avg_sample_bytes can be zero when every sample of this group is empty (e.g. '' or x''),
+    // so clamp it to avoid a division by zero
+    let mut chunk_size = config.incremental_compression_step_bytes / avg_sample_bytes.max(1);
     if chunk_size < 1 {
         chunk_size = 1;
     }
@@ -883,7 +885,7 @@ fn maintenance_for_todo(
             pretty_bytes(todo.total_bytes),
             pretty_bytes(total_size_after),
             pretty_bytes(avg_sample_bytes),
-            pretty_bytes(total_size_after / total_count_after),
+            pretty_bytes(total_size_after / total_count_after.max(1)),
         );
     }
     Ok(total_updated)
@@ -1248,6 +1250,42 @@ mod tests {
         insert_both_columns(&db2, id, id2).context("Could not run operation on compressed db")?;
 
         check_table_rows_same(&db1, &db2)?;
+
+        Ok(())
+    }
+
+    /// Regression test: a group where every value is empty has an average sample size of zero,
+    /// which used to cause a division by zero when computing the chunk size.
+    #[test]
+    fn empty_values_do_not_divide_by_zero() -> anyhow::Result<()> {
+        let db = create_example_db(None, 0)?;
+
+        for id in 1..=10 {
+            db.execute(
+                "insert into events (id, timestamp, data) values (?, '2020-01-01', '')",
+                params![id],
+            )?;
+        }
+
+        db.query_row(
+            r#"select zstd_enable_transparent(?)"#,
+            params![r#"{"table": "events", "column": "data", "compression_level": 3, "dict_chooser": "'[nodict]'"}"#],
+            |_| Ok(())
+        ).context("enable transparent")?;
+
+        db.query_row(
+            "select zstd_incremental_maintenance(9999999, 1)",
+            params![],
+            |row| row.get::<_, i64>(0),
+        )
+        .context("incremental maintenance")?;
+
+        let uncompressed_count: i64 = db.query_row(
+            "select count(*) from _events_zstd where _data_dict is null",
+            params![],
+            |row| row.get(0),
+        )?;
+        assert_eq!(uncompressed_count, 0);
 
         Ok(())
     }
